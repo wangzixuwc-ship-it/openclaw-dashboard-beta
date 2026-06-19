@@ -7,8 +7,9 @@
           <el-icon :size="24" class="brand-icon"><Monitor /></el-icon>
           <div class="brand-copy">
             <h1 class="brand-title">
-              OpenClaw 工作台
-              <span class="brand-version">v{{ APP_VERSION }}</span>
+              <span class="brand-name">OpenClaw 工作台</span>
+              <span class="brand-version">v{{ displayVersion }}</span>
+              <span v-if="isBeta" class="brand-channel">内测</span>
             </h1>
           </div>
           <span class="brand-time">{{ currentTime }}</span>
@@ -934,6 +935,9 @@ import {
 
 // App version from package.json (injected by Vite define)
 const APP_VERSION: string = __APP_VERSION__
+// 版本号主体（去掉 -beta 后缀，横排显示）+ 是否内测版（单独标签展示）
+const displayVersion = computed(() => APP_VERSION.replace(/-beta.*$/i, ''))
+const isBeta = computed(() => /beta/i.test(APP_VERSION))
 
 const store = useAgentStore()
 
@@ -2274,9 +2278,14 @@ onUnmounted(() => {
   margin: 0;
   display: flex;
   align-items: center;
-  gap: 7px;
-  flex-wrap: wrap;
+  gap: 8px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
   line-height: 1.2;
+}
+
+.brand-name {
+  white-space: nowrap;
 }
 
 .brand-version {
@@ -2284,6 +2293,20 @@ onUnmounted(() => {
   font-weight: 600;
   color: #d1d1d6;
   -webkit-text-fill-color: #d1d1d6;
+  white-space: nowrap;
+}
+
+.brand-channel {
+  font-size: 11px;
+  font-weight: 700;
+  color: #ff9f0a;
+  -webkit-text-fill-color: #ff9f0a;
+  background: rgba(255, 159, 10, 0.14);
+  border: 1px solid rgba(255, 159, 10, 0.32);
+  border-radius: 5px;
+  padding: 1px 6px;
+  line-height: 1.4;
+  white-space: nowrap;
 }
 
 .brand-time {
