@@ -1,7 +1,7 @@
 {
   "versions": [
     {
-      "version": "2.5.1-beta",
+      "version": "2.6.0-beta",
       "channel": "beta",
       "date": "2026-06-18",
       "tag": "语音对话（内测）",
