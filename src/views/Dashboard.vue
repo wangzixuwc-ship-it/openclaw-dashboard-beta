@@ -104,6 +104,16 @@
             </el-tooltip>
           </div>
 
+          <!-- 分享：一键复制介绍 + 当前版本 + 部署链接 -->
+          <div class="top-control-slot">
+            <el-tooltip content="复制工作台介绍 + 当前版本 + 部署链接，直接粘贴发给别人" placement="bottom">
+              <button class="top-indicator top-indicator-share" @click="copyShareLink">
+                <el-icon :size="13"><Link /></el-icon>
+                <span class="top-ind-label">分享</span>
+              </button>
+            </el-tooltip>
+          </div>
+
           <!-- 自定义布局 -->
           <div class="top-control-slot" :style="{ order: topBarControlOrder('layout') }">
             <el-tooltip content="自定义布局：排序页面模块 / 顶栏工具 / 功能入口" placement="bottom">
@@ -931,6 +941,7 @@ import {
   Sunny,
   Moon,
 } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 // el import removed (unused)
 
 // App version from package.json (injected by Vite define)
@@ -938,6 +949,25 @@ const APP_VERSION: string = __APP_VERSION__
 // 版本号主体（去掉 -beta 后缀，横排显示）+ 是否内测版（单独标签展示）
 const displayVersion = computed(() => APP_VERSION.replace(/-beta.*$/i, ''))
 const isBeta = computed(() => /beta/i.test(APP_VERSION))
+
+// 一键复制：工作台介绍 + 当前版本 + 部署链接，粘贴给别人即可看懂并部署
+// 仓库链接从环境变量读（VITE_SHARE_REPO_URL），不写死任何人的仓库
+async function copyShareLink() {
+  const repoUrl = (import.meta.env.VITE_SHARE_REPO_URL as string) || 'https://github.com/<你的用户名>/openclaw-dashboard'
+  const channel = isBeta.value ? '内测版' : '正式版'
+  const text = `OpenClaw Dashboard · 多 Agent 可视化工作台（v${displayVersion.value} ${channel}）
+
+一个用来管理 OpenClaw AI Agent 的可视化工作台：实时查看每个 Agent 的运行状态、对话历史、技能配置、Token 与费用消耗，还能和 Agent 语音对话。
+
+项目地址：${repoUrl}
+部署步骤：下载源码包 → npm install → 复制 .env.example 为 .env 并填写配置 → npm run dev`
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('分享内容已复制，直接粘贴给别人即可')
+  } catch {
+    ElMessage.error('复制失败，请检查浏览器剪贴板权限，或手动复制')
+  }
+}
 
 const store = useAgentStore()
 
