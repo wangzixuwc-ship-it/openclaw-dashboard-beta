@@ -134,14 +134,18 @@ async function backupDistOnStartup() {
     const backupPath = path.join(DASHBOARD_BACKUPS_DIR, backupName)
     await copyDirRecursive(DASHBOARD_DIST_DIR, backupPath)
     console.log(`[dist-backup] ✅ 已备份 dist v${version} → ${backupPath}`)
-    // 保留最近 20 个备份，超出则删除最旧的
+    // 每个版本只保留最近 1 个备份，超出则删除该版本最旧的（避免同一版本堆积太多回退点）
     const allEntries = await fs.readdir(DASHBOARD_BACKUPS_DIR).catch(() => [])
-    const validEntries = allEntries
-      .map(e => { const m = e.match(/^(.+?)_(\d+)$/); return m ? { name: e, ts: parseInt(m[2], 10) } : null })
-      .filter(Boolean)
-      .sort((a, b) => b.ts - a.ts)
-    if (validEntries.length > 20) {
-      for (const old of validEntries.slice(20)) {
+    const byVersion = {}
+    for (const e of allEntries) {
+      const m = e.match(/^(.+?)_(\d+)$/)
+      if (!m) continue
+      ;(byVersion[m[1]] ||= []).push({ name: e, ts: parseInt(m[2], 10) })
+    }
+    const KEEP_PER_VERSION = 1
+    for (const ver of Object.keys(byVersion)) {
+      const list = byVersion[ver].sort((a, b) => b.ts - a.ts)
+      for (const old of list.slice(KEEP_PER_VERSION)) {
         await fs.rm(path.join(DASHBOARD_BACKUPS_DIR, old.name), { recursive: true, force: true }).catch(() => {})
         console.log(`[dist-backup] 清理旧备份：${old.name}`)
       }
