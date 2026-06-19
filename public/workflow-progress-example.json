@@ -1,0 +1,13 @@
+{
+  "projectName": "项目名称",
+  "taskSummary": "任务名称",
+  "mode": "模式",
+  "activeStep": -1,
+  "steps": [
+    { "title": "副总" },
+    { "title": "执行秘书" },
+    { "title": "前端" },
+    { "title": "执行秘书" },
+    { "title": "副总" }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "name": "OpenClaw 工作台 2.0",
+  "short_name": "OpenClaw工作台",
+  "description": "OpenClaw 多 Agent 指挥舱：Token/费用总览、Agent 工作脉冲、技能库、活动时间线",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone"],
+  "orientation": "any",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "/app-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/app-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+# 依赖与构建
+node_modules
+dist
+dist-ssr
+output
+.vite-cache
+*.local
+
+# 环境变量与密钥（绝不提交）
+.env
+.env.local
+.env.*.local
+billing-config.json
+certs/
+
+# 本地运行时数据（用户私有）
+.openclaw
+data/
+public/changelog/
+public/versions-cache.json
+public/workflow-progress.json
+test-sandbox
+
+# 自动生成
+auto-imports.d.ts
+components.d.ts
+
+# 演示资产（含运行数据，不分发）
+docs/screenshots/
+docs/demo/
+
+# 日志
+logs
+*.log
+npm-debug.log*
+
+# 系统 / 编辑器
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.sw?
+
+# 打包产物
+*.zip
