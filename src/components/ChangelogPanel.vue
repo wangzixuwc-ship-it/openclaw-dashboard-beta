@@ -32,15 +32,15 @@
         >
           <span class="cl-ver-dot" :class="v.version === currentVersion ? 'dot-current' : 'dot-normal'"></span>
           <div class="cl-ver-main">
-            <div class="cl-ver-top">
-              <span class="cl-ver-num">v{{ v.version }}</span>
+            <span class="cl-ver-num">v{{ v.version }}</span>
+            <div v-if="v.channel === 'beta' || v.version === currentVersion" class="cl-ver-tags">
+              <span v-if="v.channel === 'beta'" class="cl-ver-beta">内测</span>
               <span v-if="v.version === currentVersion" class="cl-ver-badge">当前</span>
             </div>
-            <div class="cl-ver-sub">
-              <span v-if="v.channel === 'beta'" class="cl-ver-beta">内测</span>
+            <div class="cl-ver-desc">
               <span class="cl-ver-tag">{{ v.tag }}</span>
+              <span class="cl-ver-date">{{ v.date }}</span>
             </div>
-            <span class="cl-ver-date">{{ v.date }}</span>
           </div>
         </div>
       </div>
@@ -404,21 +404,23 @@ declare const __APP_VERSION__: string
   min-width: 0;
   flex: 1;
 }
-.cl-ver-top {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
 .cl-ver-num {
   font-size: 13px;
   font-weight: 700;
   color: var(--text-primary);
   white-space: nowrap;
 }
-.cl-ver-sub {
+/* 内测 + 当前 两个标签放一行 */
+.cl-ver-tags {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+/* 灰字说明（标题 + 日期）一行 */
+.cl-ver-desc {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   min-width: 0;
 }
 .cl-ver-badge {
@@ -447,11 +449,15 @@ declare const __APP_VERSION__: string
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
 }
 .cl-ver-date {
   font-size: 11px;
   color: var(--text-secondary);
   opacity: 0.6;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 /* ── 右侧详情 ── */
 .cl-detail {
