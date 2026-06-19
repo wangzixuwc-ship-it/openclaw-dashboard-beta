@@ -8,6 +8,9 @@
         <span class="cl-range">当前体系：Workbench 2.0 · 最新：{{ versions[0]?.date || '-' }}</span>
       </div>
       <div class="cl-toolbar-right">
+        <button class="cl-btn cl-btn-share" @click="copyShare" :disabled="!selected" title="复制选中版本的介绍 + 部署链接，发给别人即可部署该版本">
+          分享此版本
+        </button>
         <button class="cl-btn cl-btn-ghost" @click="fetchBackups" :disabled="loadingBackups" title="刷新备份列表">
           <span v-if="loadingBackups" class="cl-spin">刷新中</span>
           <span v-else>备份（{{ backups.length }}）</span>
@@ -188,6 +191,28 @@ const backupsForSelected = computed(() => {
   return backups.value.filter(b => b.version === selected.value!.version)
 })
 
+// 复制「当前选中版本」的分享内容（介绍 + 该版本功能 + 该版本部署链接），粘贴给别人即可部署对应版本
+// 仓库地址从环境变量 VITE_SHARE_REPO_URL 读，不写死任何仓库
+function copyShare() {
+  const v = selected.value
+  if (!v) return
+  const repo = (import.meta.env.VITE_SHARE_REPO_URL as string) || 'https://github.com/<你的用户名>/openclaw-dashboard'
+  const channel = v.channel === 'beta' ? '内测版' : '正式版'
+  const feats = (v.features || []).map((f) => '· ' + f).join('\n')
+  const text = `OpenClaw Dashboard · v${v.version}（${channel}）—— 多 Agent 可视化管理工作台
+${v.summary}
+
+本版功能：
+${feats}
+
+下载部署：${repo}/releases/tag/v${v.version}
+（下载源码包 → npm install → 复制 .env.example 为 .env 填配置 → npm run dev）`
+  navigator.clipboard.writeText(text).then(
+    () => ElMessage.success(`已复制 v${v.version} 的分享内容，直接粘贴给别人`),
+    () => ElMessage.error('复制失败，请检查浏览器剪贴板权限，或手动复制'),
+  )
+}
+
 // 加载当前 package.json 版本号
 async function load() {
   try {
@@ -304,6 +329,14 @@ declare const __APP_VERSION__: string
 .cl-btn:hover { background: rgba(10, 132, 255, 0.13); color: var(--text-primary); border-color: rgba(10, 132, 255, 0.30); }
 .cl-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .cl-btn-ghost { background: rgba(255, 255, 255, 0.045); border: 1px solid var(--glass-card-border); }
+.cl-btn-share {
+  background: rgba(10, 132, 255, 0.14);
+  border: 1px solid rgba(10, 132, 255, 0.32);
+  color: #0a84ff;
+  font-weight: 600;
+}
+.cl-btn-share:hover { background: rgba(10, 132, 255, 0.22); border-color: #0a84ff; }
+.cl-btn-share:disabled { opacity: 0.4; cursor: not-allowed; }
 .cl-btn-rollback {
   background: rgba(255, 159, 10, 0.1);
   border: 1px solid rgba(255, 159, 10, 0.3);
