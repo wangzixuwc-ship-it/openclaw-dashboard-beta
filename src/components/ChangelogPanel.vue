@@ -27,14 +27,18 @@
           :class="{ active: selected?.version === v.version, current: v.version === currentVersion }"
           @click="selected = v"
         >
-          <div class="cl-ver-dot" :class="v.version === currentVersion ? 'dot-current' : 'dot-normal'"></div>
-          <div class="cl-ver-meta">
-            <span class="cl-ver-num">v{{ v.version }}</span>
-            <span v-if="v.channel === 'beta'" class="cl-ver-beta">内测</span>
-            <span v-if="v.version === currentVersion" class="cl-ver-badge">当前</span>
-            <span class="cl-ver-tag">{{ v.tag }}</span>
+          <span class="cl-ver-dot" :class="v.version === currentVersion ? 'dot-current' : 'dot-normal'"></span>
+          <div class="cl-ver-main">
+            <div class="cl-ver-top">
+              <span class="cl-ver-num">v{{ v.version }}</span>
+              <span v-if="v.version === currentVersion" class="cl-ver-badge">当前</span>
+            </div>
+            <div class="cl-ver-sub">
+              <span v-if="v.channel === 'beta'" class="cl-ver-beta">内测</span>
+              <span class="cl-ver-tag">{{ v.tag }}</span>
+            </div>
+            <span class="cl-ver-date">{{ v.date }}</span>
           </div>
-          <div class="cl-ver-date">{{ v.date }}</div>
         </div>
       </div>
 
@@ -334,12 +338,9 @@ declare const __APP_VERSION__: string
 .cl-sidebar::-webkit-scrollbar-track { background: transparent; }
 
 .cl-version-item {
-  display: grid;
-  grid-template-columns: 14px minmax(0, 1fr) auto;
-  grid-template-rows: auto auto;
-  align-items: center;
-  gap: 4px 6px;
-  padding: 7px 10px;
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
   cursor: pointer;
   border-left: 3px solid transparent;
   transition: all 0.15s;
@@ -356,48 +357,68 @@ declare const __APP_VERSION__: string
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  grid-row: 1;
   flex-shrink: 0;
+  margin-top: 5px;
 }
 .dot-current { background: #30d158; box-shadow: 0 0 5px rgba(48, 209, 88,0.5); }
 .dot-normal { background: rgba(235, 235, 245, 0.30); }
 
-.cl-ver-meta {
+/* 主体：纵向三行 —— 版本号行 / 标签+标题行 / 日期 */
+.cl-ver-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+.cl-ver-top {
   display: flex;
   align-items: center;
-  gap: 5px;
-  grid-row: 1;
+  gap: 6px;
 }
-.cl-ver-num { font-size: 13px; font-weight: 700; color: var(--text-primary); }
+.cl-ver-num {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+.cl-ver-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
 .cl-ver-badge {
   font-size: 10px;
-  padding: 1px 4px;
+  padding: 1px 5px;
   border-radius: 3px;
   background: rgba(48, 209, 88,0.15);
   color: #30d158;
   border: 1px solid rgba(48, 209, 88,0.3);
+  white-space: nowrap;
 }
 .cl-ver-beta {
   font-size: 10px;
-  padding: 1px 4px;
+  padding: 1px 5px;
   border-radius: 3px;
   background: rgba(255, 159, 10, 0.15);
   color: #ff9f0a;
   border: 1px solid rgba(255, 159, 10, 0.3);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.cl-ver-tag {
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .cl-ver-date {
   font-size: 11px;
   color: var(--text-secondary);
-  opacity: 0.7;
-  grid-column: 2;
-  grid-row: 2;
-}
-.cl-ver-tag {
-  font-size: 10px;
-  color: var(--text-secondary);
   opacity: 0.6;
-  grid-column: 3;
-  grid-row: 1;
 }
 /* ── 右侧详情 ── */
 .cl-detail {
