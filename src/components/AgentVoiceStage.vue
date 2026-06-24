@@ -607,15 +607,6 @@ const elapsedLabel = computed(() => {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 })
 
-const captionTone = computed(() => props.error ? 'error' : props.transcript ? 'live' : 'info')
-
-const captionText = computed(() => {
-  if (props.error) return localizeVoiceMessage(props.error)
-  if (props.transcript) return `“${props.transcript}”`
-  if (props.responseText) return localizeVoiceMessage(props.responseText)
-  return ''
-})
-
 const cloneStatusText = computed(() => {
   if (cloneBusy.value) return '处理中'
   if (cloneRecording.value) return '录音中'
@@ -625,22 +616,6 @@ const cloneStatusText = computed(() => {
   }
   if (settingsDraft.value.sampleUrl) return '样本已保存'
   return '未克隆'
-})
-
-const currentVoiceSummary = computed(() => {
-  if (settingsDraft.value.provider === 'backend' && settingsDraft.value.backendVoiceId) {
-    return `当前音色：${settingsDraft.value.clonedVoiceName || settingsDraft.value.backendVoiceId}`
-  }
-  if (settingsDraft.value.sampleName) {
-    return `当前样本：${settingsDraft.value.sampleName}`
-  }
-  return '当前 Agent 暂无声音样本'
-})
-
-const fallbackVoiceSummary = computed(() => {
-  if (!settingsDraft.value.browserVoiceURI) return '系统默认'
-  const selected = voiceOptions.value.find((voice) => voice.voiceURI === settingsDraft.value.browserVoiceURI)
-  return selected ? `${selected.name} · ${selected.lang}` : '已选择'
 })
 
 const voiceSettingsNote = computed(() => {
@@ -674,21 +649,6 @@ const waveBars = computed(() => {
     return Math.round(idleHeight + height * (0.26 + level * 0.74) * flow * edgeSoftness)
   })
 })
-
-function localizeVoiceMessage(message: string): string {
-  const raw = String(message || '').trim()
-  const normalized = raw.toLowerCase()
-  const map: Record<string, string> = {
-    network: '语音识别网络连接失败，请检查当前网络或稍后重试。',
-    'not-allowed': '麦克风权限被拒绝，请在浏览器地址栏里允许麦克风。',
-    'service-not-allowed': '浏览器语音识别服务不可用，请切换到可信 HTTPS 入口后重试。',
-    'audio-capture': '没有检测到可用麦克风，请检查输入设备。',
-    'bad-grammar': '语音识别语法配置不可用。',
-    'language-not-supported': '当前浏览器不支持中文语音识别。',
-  }
-  if (map[normalized]) return map[normalized]
-  return raw
-}
 
 function syncTheme() {
   isLightTheme.value = document.documentElement.classList.contains('light-theme')
@@ -767,66 +727,6 @@ function clearCloneTimer() {
   if (cloneTimer) {
     clearInterval(cloneTimer)
     cloneTimer = null
-  }
-}
-
-async function uploadAndCloneVoice(blob: Blob, filename: string, mimeType: string) {
-  cloneBusy.value = true
-  settingsNotice.value = '正在上传声音样本...'
-  try {
-    const audioBase64 = await blobToBase64(blob)
-    const uploadResp = await fetch('/api/voice/samples', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        audioBase64,
-        mimeType: mimeType || blob.type || 'audio/webm',
-        filename,
-      }),
-    })
-    const uploadData = await uploadResp.json().catch(() => ({}))
-    if (!uploadResp.ok || !uploadData.url) {
-      throw new Error(uploadData.error || '声音样本上传失败')
-    }
-
-    settingsNotice.value = '样本已上传，正在创建克隆音色...'
-    const cloneResp = await fetch('/api/voice/clone', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sampleUrl: uploadData.url,
-        name: `${props.agentName} 的声音`,
-        provider: settingsDraft.value.backendProvider || 'auto',
-        agentId: currentAgentId(),  // 归属当前 Agent，只在它的面板显示
-      }),
-    })
-    const cloneData = await cloneResp.json().catch(() => ({}))
-    if (!cloneResp.ok || !cloneData.voiceId) {
-      throw new Error(cloneData.error || '克隆音色创建失败')
-    }
-
-    const synthesisReady = cloneData.synthesisReady === true
-      || (cloneData.status === 'ready' && cloneData.provider !== 'local-reference')
-    settingsDraft.value = {
-      ...settingsDraft.value,
-      provider: synthesisReady ? 'backend' : 'browser',
-      backendVoiceId: String(cloneData.voiceId),
-      backendProvider: String(cloneData.provider || settingsDraft.value.backendProvider || ''),
-      clonedVoiceName: String(cloneData.name || `${props.agentName} 的声音`),
-      cloneStatus: String(cloneData.status || 'ready'),
-      sampleName: String(uploadData.filename || filename),
-      sampleUrl: String(uploadData.url || ''),
-      sampleDataUrl: '',
-    }
-    saveAgentVoiceSettings(voiceSettingsKey.value, settingsDraft.value)
-    settingsNotice.value = cloneData.message
-      || (!synthesisReady
-        ? '声音样本已保存；配置本地 GPT-SoVITS、CosyVoice 或 TTS 命令后即可用它发声。'
-        : '语音克隆已完成，并已绑定到当前 Agent。')
-  } catch (e: any) {
-    settingsNotice.value = e?.message || '语音克隆失败，请检查后端配置。'
-  } finally {
-    cloneBusy.value = false
   }
 }
 
@@ -1111,9 +1011,8 @@ onUnmounted(() => {
   top: 0;
   left: 0;
   bottom: 0;
-  width: max(360px, calc(100vw - 1040px));
-  max-width: 620px;
-  min-width: 320px;
+  right: 1040px; /* 严丝合缝贴住右侧抽屉(el-drawer size=1040px)左边缘，消除中间留白 */
+  width: auto;
   pointer-events: auto;
   display: flex;
   align-items: stretch;
@@ -2077,7 +1976,9 @@ onUnmounted(() => {
   }
 }
 
-@media (max-width: 1380px) {
+/* 整页已按 1440 基准等比缩放，笔记本窄屏也能完整放下语音窗口；
+   仅在手机级超窄屏(<820px)才隐藏，避免语音窗口与详情挤在一起。 */
+@media (max-width: 820px) {
   .agent-voice-stage {
     display: none;
   }

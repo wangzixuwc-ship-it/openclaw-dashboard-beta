@@ -1,6 +1,35 @@
 {
   "versions": [
     {
+      "version": "2.8.0-beta",
+      "channel": "beta",
+      "date": "2026-06-24",
+      "tag": "朗读回复 + 语音提速",
+      "summary": "打字也能让 Agent 用克隆音色念回复；语音回复更快、分段不再卡顿",
+      "features": [
+        "新增「朗读回复」开关：打字发消息，回复会用该 Agent 的克隆音色边出字边念出来——不用开麦、不弹通话界面（仅「快速对话」模式可用）",
+        "语音提速：回复边生成边合成播放，攒够几个字就提前开念，第一句出声更快，不再「文字全出来了声音才来」",
+        "消除语音分段停顿：念当前句时已在后台合成下一句，句与句无缝衔接，不再「说一段等很久再说下一段」"
+      ]
+    },
+    {
+      "version": "2.7.0-beta",
+      "channel": "beta",
+      "date": "2026-06-23",
+      "tag": "对话模型切换 + 历史看全文",
+      "summary": "个人对话页可一键切换思考模型(千问/MiniMax/DeepSeek/GPT)，历史搜索能查看完整对话原文",
+      "features": [
+        "个人对话页顶部新增「思考模型」切换：一键给 Agent 换大脑(GPT-5.5 / 通义千问 / DeepSeek / MiniMax)，改写 OpenClaw 配置并热重载，全局生效",
+        "接入通义千问(Max/Plus/Turbo)与 MiniMax(M3/M2.5)模型，可随时切换对比速度与效果",
+        "历史总结搜索结果新增「查看完整对话」：弹窗显示该会话完整原文与上下文，命中关键词高亮，自动过滤元数据等系统噪声",
+        "历史搜索增强：支持搜全量历史、跨所有 Agent 搜索、且不受时间范围限制(能搜到被 AI 总结掉的原文)",
+        "对话消息改为流式实时刷新，替代原来的 3 秒轮询，新消息出现更快",
+        "对话提速：新增「快速对话」模式（默认）——直连模型、流式逐字秒回（绕开网关与重型 Agent），打字和语音都适用；需要用工具/办事时切「代理模式」走完整 Agent",
+        "语音对话提速：语音也走快速通道，回复强制简短口语化，从十几秒等待降到几秒出声",
+        "稳定性：修复网关繁忙时工作台整页空白/卡死（改读后端文件、不再被网关拖垮）；修复连按回车重复发送、输入框卡死"
+      ]
+    },
+    {
       "version": "2.6.0-beta",
       "channel": "beta",
       "date": "2026-06-18",
@@ -30,8 +59,8 @@
         "模型消耗列表最多显示 3 个 + 内部滚动，折线图高度稳定",
         "浅色模式折线图清晰度优化（描边、轴色加深）"
       ],
-      "channel": "stable",
-      "image": "/changelog/01-overview.png"
+      "image": "/changelog/01-overview.png",
+      "channel": "stable"
     },
     {
       "version": "2.4.0",
@@ -45,8 +74,8 @@
         "一级功能弹窗统一规格，大小高低一致，不再参差",
         "任务中心修复：标题、编辑保存、多层弹窗被压等问题"
       ],
-      "channel": "stable",
-      "image": "/changelog/07-token.png"
+      "image": "/changelog/07-token.png",
+      "channel": "stable"
     },
     {
       "version": "2.3.0",
@@ -60,8 +89,8 @@
         "历史总结接入 AI 摘要（本地 Gemma + DeepSeek 分流）",
         "全站中文化，emoji 清零、统一为规范图标"
       ],
-      "channel": "stable",
-      "image": "/changelog/04-projects.png"
+      "image": "/changelog/04-projects.png",
+      "channel": "stable"
     },
     {
       "version": "2.2.0",
@@ -73,8 +102,8 @@
         "全站图标统一为 Element Plus 规范图标，替换杂乱 emoji",
         "深色主题细节校准（标题栏等）"
       ],
-      "channel": "stable",
-      "image": "/changelog/02-skills.png"
+      "image": "/changelog/02-skills.png",
+      "channel": "stable"
     },
     {
       "version": "2.1.0",
@@ -86,8 +115,8 @@
         "各模型显示官方品牌 logo（OpenAI / DeepSeek / 通义等），一眼识别",
         "Agent 头像与模型图标整体优化"
       ],
-      "channel": "stable",
-      "image": "/changelog/01-overview.png"
+      "image": "/changelog/01-overview.png",
+      "channel": "stable"
     },
     {
       "version": "2.0.0",
@@ -103,8 +132,8 @@
         "任务看板默认下沉并折叠，首屏优先呈现运营概览；需要排查 Agent 时再展开任务区",
         "浅色和暗色主题重新校准，对比度、卡片层级、按钮状态和空白区域更适合长时间查看"
       ],
-      "channel": "stable",
-      "image": "/changelog/01-overview.png"
+      "image": "/changelog/01-overview.png",
+      "channel": "stable"
     }
   ]
 }

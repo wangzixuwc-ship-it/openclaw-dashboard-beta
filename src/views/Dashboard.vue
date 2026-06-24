@@ -104,7 +104,7 @@
             </el-tooltip>
           </div>
 
-          <!-- 自定义布局 -->
+          <!-- 自定义布局：进入画布编辑（鼠标拖模块位置 / 拖右下角改大小） -->
           <div class="top-control-slot" :style="{ order: topBarControlOrder('layout') }">
             <el-tooltip content="自定义布局：排序页面模块 / 顶栏工具 / 功能入口" placement="bottom">
               <button class="top-layout-btn" @click="layoutDialogVisible = true">
@@ -207,9 +207,6 @@
             @mousemove="handleTokenMiniChartMove"
             @mouseleave="clearTokenMiniHover"
           >
-            <div class="token-mini-chart-head">
-              <span>{{ tokenMiniRangeLabel }} · {{ tokenMiniMetricLabel }}</span>
-            </div>
             <div class="token-mini-plot" ref="tokenMiniPlotEl" v-if="tokenMiniChartPoints.length > 1">
             <svg
               class="token-mini-svg"
@@ -390,7 +387,6 @@
           <div class="cockpit-card-header">
             <div>
               <div class="cockpit-eyebrow">Agent 工作脉冲</div>
-              <h2>{{ store.runningAgents.length }} 个正在干活</h2>
             </div>
             <div class="agent-pulse-summary">
               <span>{{ recentlyActiveAgents.length }} 个近期动过</span>
@@ -425,7 +421,6 @@
           <div class="cockpit-card-header">
             <div>
               <div class="cockpit-eyebrow">{{ contributionEyebrow }}</div>
-              <h2>{{ contributionTitle }}</h2>
             </div>
             <button class="cockpit-link-btn" @click="tokenDetailVisible = true">看明细</button>
           </div>
@@ -1189,10 +1184,6 @@ const tokenMiniScale = computed(() => ({
   tokens: niceScaleTight(tokenMiniChartMaxFor('tokens')),
   cost: niceScaleTight(tokenMiniChartMaxFor('cost')),
 }))
-const AGENT_AVATAR_EXTENSION: Record<string, 'jpg' | 'png'> = {
-  main: 'jpg',
-}
-
 const tokenMiniRange = ref<TokenMiniRangeValue>('7d')
 const tokenMiniCustomRange = ref<[string, string] | null>(null)
 const tokenMiniCustomRangeDraft = ref<string[]>([])
@@ -1237,8 +1228,7 @@ function getAgentAvatarSrc(agent: AgentInfo): string {
   const envKey = `VITE_AGENT_${id.replace(/-/g, '_').toUpperCase()}_AVATAR`
   const envAvatar = (import.meta.env as Record<string, string>)[envKey]
   if (envAvatar) return envAvatar
-  const extension = AGENT_AVATAR_EXTENSION[id] || 'png'
-  return `/avatars/${id}.${extension}`
+  return `/avatars/thumb/${id}.webp`
 }
 
 function isRecentlyActive(agent: AgentInfo): boolean {
@@ -1601,7 +1591,6 @@ const tokenMiniRangeLabel = computed(() => {
   return TOKEN_MINI_RANGES.find((opt) => opt.value === tokenMiniRange.value)?.label || '全部'
 })
 const contributionEyebrow = computed(() => tokenMiniMetric.value === 'cost' ? '费用排行' : '贡献排行')
-const contributionTitle = computed(() => tokenMiniMetric.value === 'cost' ? '谁最能花钱' : '谁最能干')
 const contributionEmptyText = computed(() => tokenMiniMetric.value === 'cost' ? '暂无费用贡献数据' : '暂无 Token 贡献数据')
 const contributionBarColor = computed(() => (
   tokenMiniMetric.value === 'cost' ? COST_METRIC_COLOR : TOKEN_METRIC_COLOR
@@ -4152,7 +4141,10 @@ onUnmounted(() => {
 }
 
 /* ==================== RESPONSIVE ==================== */
-@media (max-width: 1280px) {
+/* 已改为「整页等比缩放」：index.html 按 1440 基准对整页 zoom，主页布局在任意窗口宽度
+   恒定为多列、靠 zoom 等比缩小，不再按窗口宽重排。下面这些断点统一停用
+   (max-width:1px 永不触发)，避免等比缩放被重排打断。要恢复响应式把 1px 改回原值即可。 */
+@media (max-width: 1px) {
   .scope-toolbar {
     align-items: flex-start;
     flex-wrap: wrap;
@@ -4187,7 +4179,7 @@ onUnmounted(() => {
   }
 }
 
-@media (max-width: 1024px) {
+@media (max-width: 1px) {
   .agent-pulse-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -4201,7 +4193,7 @@ onUnmounted(() => {
   }
 }
 
-@media (max-width: 768px) {
+@media (max-width: 1px) {
   .status-bar-inner {
     flex-direction: column;
     align-items: flex-start;
@@ -4267,7 +4259,7 @@ onUnmounted(() => {
   }
 }
 
-@media (max-width: 480px) {
+@media (max-width: 1px) {
   .brand-title {
     font-size: 16px;
   }
@@ -4290,6 +4282,59 @@ html.light-theme .token-mini-axis-label.is-cost { fill: #1f9e43; opacity: 1; }
 
 <!-- 非 scoped：通知 popper 渲染到 body，需要全局选择器 -->
 <style>
+/* ===== 画布式自定义布局（grid-layout-plus）===== */
+.dash-grid {
+  width: 100%;
+}
+.dash-grid-item {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+}
+.dash-drag-handle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  margin-bottom: 6px;
+  background: var(--el-color-primary);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 10px;
+  cursor: move;
+  user-select: none;
+}
+.dash-grid-item > section,
+.dash-grid-item > div {
+  height: 100%;
+  margin: 0 !important;
+  box-sizing: border-box;
+}
+/* 编辑模式：每个模块虚线描边 + 抓手光标 */
+.dash-grid--editing .vgl-item {
+  outline: 2px dashed var(--el-color-primary);
+  outline-offset: -3px;
+  border-radius: 12px;
+  cursor: move;
+}
+/* 编辑模式：整个模块可拖（grid-layout-plus 默认监听 vgl-item） */
+/* 拖拽时的占位影子 */
+.dash-grid .vgl-item--placeholder {
+  background: var(--el-color-primary);
+  opacity: 0.16;
+  border-radius: 12px;
+}
+.top-layout-btn--active {
+  background: var(--el-color-primary) !important;
+  color: #fff !important;
+  border-color: var(--el-color-primary) !important;
+}
+.top-layout-reset {
+  margin-left: 6px;
+}
+
 .token-mini-custom-range.el-date-editor {
   width: 230px !important;
   flex: 0 0 230px;

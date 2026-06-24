@@ -1238,7 +1238,7 @@ function normalizeAgentAvatarId(agentId: string): string {
   return id
 }
 
-// 头像图片路径：优先 .env 配置 → /avatars/{normalized-id}.png/.jpg → 加载失败降级
+// 头像图片路径：优先 .env 配置 → 小头像资源 → 加载失败降级
 const avatarFailed = ref<Record<string, boolean>>({})
 function getAgentAvatarSrc(agentId: string): string {
   const idUpper = agentId.replace(/-/g, '_').toUpperCase()
@@ -1246,7 +1246,7 @@ function getAgentAvatarSrc(agentId: string): string {
   const envPath = (import.meta.env as Record<string, string>)[envKey]
   if (envPath) return envPath
   const avatarId = normalizeAgentAvatarId(agentId)
-  return `/avatars/${avatarId}.${avatarId === 'main' ? 'jpg' : 'png'}`
+  return `/avatars/thumb/${avatarId}.webp`
 }
 
 function handleAgentAvatarError(agentId: string): void {

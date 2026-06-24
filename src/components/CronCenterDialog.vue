@@ -551,7 +551,7 @@ function agentLabel(id?: string): string {
 }
 function agentAvatar(id?: string): string {
   const agentId = id || 'main'
-  return `/avatars/${agentId}.${agentId === 'main' ? 'jpg' : 'png'}`
+  return `/avatars/thumb/${agentId}.webp`
 }
 const allAgentOptions = computed(() => AGENT_IDS.map(id => ({ id, name: agentLabel(id), avatar: agentAvatar(id) })))
 const agentOptions = computed(() => {

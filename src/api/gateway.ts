@@ -3,6 +3,7 @@ import { getAuthToken } from '../config/auth'
 
 // Always use /api prefix — Vite proxy rewrites /api → gateway root
 const GATEWAY_BASE_URL = '/api'
+const LOCAL_API_BASE = import.meta.env.VITE_BACKEND_URL || ''
 
 const gatewayApi = axios.create({
   baseURL: GATEWAY_BASE_URL,
@@ -146,10 +147,7 @@ export async function health(): Promise<unknown> {
 export async function getGpuVramUsage(): Promise<{ usedPct: number; usedMb: number; totalMb: number } | null> {
   try {
     // 注意：不能用 gatewayApi（其 baseURL='/api' 会导致双重前缀）
-    // 开发环境走 Vite proxy，生产环境直连后端
-    const url = import.meta.env.DEV
-      ? '/api/gpu-vram'
-      : `${import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:31004'}/api/gpu-vram`
+    const url = `${LOCAL_API_BASE}/api/gpu-vram`
     const resp = await axios.get(url, { timeout: 10000 })
     const data = resp.data as { usedPct: number | null; usedMb?: number; totalMb?: number }
     if (data?.usedPct != null) {
@@ -188,10 +186,7 @@ export class ToolRestrictedError extends Error {
  */
 export async function resetSession(agentId: string): Promise<unknown> {
   try {
-    // 参考 getGpuVramUsage 的 URL 处理模式（DEV 用 Vite proxy，PROD 直连后端）
-    const url = import.meta.env.DEV
-      ? '/reset'
-      : `${import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:31002'}/reset`
+    const url = `${LOCAL_API_BASE}/reset`
     const resp = await axios.post(url, { agentId }, { timeout: 10000 })
     return resp.data
   } catch (e: any) {

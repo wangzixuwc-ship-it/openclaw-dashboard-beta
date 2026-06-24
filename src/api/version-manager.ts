@@ -1,8 +1,6 @@
 import axios from 'axios'
 
-const BACKEND_URL = import.meta.env.DEV
-  ? ''
-  : import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:31002'
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || ''
 
 export interface VersionInfo {
   version: string

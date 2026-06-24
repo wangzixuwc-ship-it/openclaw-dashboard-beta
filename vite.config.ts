@@ -122,7 +122,8 @@ export default defineConfig(({ mode }) => {
   console.log('[Vite] Backend Port (for proxy):', backendPort)
   console.log('[Vite] HTTPS:', https ? 'enabled' : 'disabled')
 
-  return {
+  // 用变量承载配置，末尾让 preview 完全复用 server（远程生产预览 vite preview 用同样的代理 / https）
+  const config: any = {
     cacheDir: '.vite-cache',
     define: {
       __APP_VERSION__: JSON.stringify(pkg.version),
@@ -168,8 +169,18 @@ export default defineConfig(({ mode }) => {
           target: `http://localhost:${backendPort}`,
           changeOrigin: true,
         },
+        '/api/agent-stream': {
+          // Agent 消息 SSE 流式增量（替代 3 秒轮询，端口由 BACKEND_PORT 决定）
+          target: `http://localhost:${backendPort}`,
+          changeOrigin: true,
+        },
         '/api/session-detail': {
           // 单个 session 详情（活动时间线点击查看做了什么，端口 31002）
+          target: `http://localhost:${backendPort}`,
+          changeOrigin: true,
+        },
+        '/api/session-fulltext': {
+          // 历史搜索"展开全文"：返回单会话完整原文（端口由 BACKEND_PORT 决定）
           target: `http://localhost:${backendPort}`,
           changeOrigin: true,
         },
@@ -193,9 +204,35 @@ export default defineConfig(({ mode }) => {
           target: `http://localhost:${backendPort}`,
           changeOrigin: true,
         },
+        '/api/agent-latest-reply': {
+          // 语音通话用：轻量取最新一条 assistant 回复（只读会话末尾，避免拉全量历史）
+          target: `http://localhost:${backendPort}`,
+          changeOrigin: true,
+        },
         '/api/agent-send-message': {
           // 通过 openclaw CLI 发消息给 agent（端口 31002）
           target: `http://localhost:${backendPort}`,
+          changeOrigin: true,
+        },
+        '/api/agent-model': {
+          // 查 agent 当前模型 + 可选模型
+          target: `http://localhost:${backendPort}`,
+          changeOrigin: true,
+        },
+        '/api/agent-set-model': {
+          // 切换 agent 主模型
+          target: `http://localhost:${backendPort}`,
+          changeOrigin: true,
+        },
+        '/api/quick-chat': {
+          // Lumi 式直连流式对话(绕开网关/重型 agent)；SSE 流式，不能缓冲
+          target: `http://localhost:${backendPort}`,
+          changeOrigin: true,
+        },
+        '/api/voice/asr-stream': {
+          // 实时语音识别 WebSocket（阿里 paraformer-realtime，边说边识别）——必须放在 /api/voice 前、且开 ws
+          target: `ws://localhost:${backendPort}`,
+          ws: true,
           changeOrigin: true,
         },
         '/api/voice': {
@@ -272,7 +309,7 @@ export default defineConfig(({ mode }) => {
           target: gatewayUrl,
           changeOrigin: true,
           ws: true, // Enable WebSocket proxy
-          rewrite: (path) => path.replace(/^\/api/, ''),
+          rewrite: (path: string) => path.replace(/^\/api/, ''),
         },
       },
     },
@@ -290,4 +327,6 @@ export default defineConfig(({ mode }) => {
       },
     },
   }
+  config.preview = config.server
+  return config
 })

@@ -1559,7 +1559,7 @@ function shortAgentName(fullName: string): string {
 }
 
 function getAgentAvatar(id: string): string {
-  return `/avatars/${id}.${id === 'main' ? 'jpg' : 'png'}`
+  return `/avatars/thumb/${id}.webp`
 }
 
 function getAgentLabel(id: string): string {

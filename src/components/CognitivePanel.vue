@@ -148,7 +148,7 @@ import { InfoFilled, QuestionFilled } from '@element-plus/icons-vue'
 
 const props = defineProps<{ agentId?: string; lastAnalysis?: any }>()
 
-const BACKEND = import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:31022'
+const BACKEND = import.meta.env.VITE_BACKEND_URL || ''
 const activeTab = ref('cognitive')
 
 // ── 认知引擎 ──────────────────────────────────────────────────────────────────

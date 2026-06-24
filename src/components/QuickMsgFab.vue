@@ -185,7 +185,7 @@ const triggerStyle = computed(() => {
 const AGENT_ORDER = ['pm', 'developer', 'tester', 'inspector', 'archivist', 'designer', 'main']
 
 function agentAvatar(id: string): string {
-  return `/avatars/${id}.${id === 'main' ? 'jpg' : 'png'}`
+  return `/avatars/thumb/${id}.webp`
 }
 
 const agentList = computed<AgentItem[]>(() => {

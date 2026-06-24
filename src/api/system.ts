@@ -1,5 +1,7 @@
 import axios from 'axios'
 
+const SYSTEM_API_BASE = import.meta.env.VITE_BACKEND_URL || ''
+
 /** 技能信息接口 (REC-005) */
 export interface SkillInfo {
   name: string
@@ -40,9 +42,7 @@ export interface SkillsResponse {
  */
 export async function getVersion(): Promise<{ version: string } | null> {
   try {
-    const url = import.meta.env.DEV
-      ? '/api/system/version'
-      : `${import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:31002'}/api/system/version`
+    const url = `${SYSTEM_API_BASE}/api/system/version`
     const resp = await axios.get(url, { timeout: 10000 })
     return resp.data as { version: string }
   } catch {
@@ -67,9 +67,7 @@ export interface DoctorResult {
 
 export async function runDoctor(): Promise<DoctorResult> {
   // 诊断命令本身约 30 秒，超时设 180s 留余量
-  const url = import.meta.env.DEV
-    ? '/api/system/doctor'
-    : `${import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:31002'}/api/system/doctor`
+  const url = `${SYSTEM_API_BASE}/api/system/doctor`
   try {
     const resp = await axios.post(url, {}, { timeout: 180000 })
     return resp.data as DoctorResult
@@ -92,9 +90,7 @@ export async function runDoctor(): Promise<DoctorResult> {
  */
 export async function getSkills(): Promise<SkillsResponse | null> {
   try {
-    const url = import.meta.env.DEV
-      ? '/api/system/skills'
-      : `${import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:31002'}/api/system/skills`
+    const url = `${SYSTEM_API_BASE}/api/system/skills`
     const resp = await axios.get(url, { timeout: 15000 })
     return resp.data as SkillsResponse
   } catch (e: unknown) {
@@ -118,9 +114,7 @@ export interface InstallSkillResult {
 
 export async function installSkill(name: string, source?: 'builtin' | 'clawhub'): Promise<InstallSkillResult | null> {
   try {
-    const url = import.meta.env.DEV
-      ? '/api/system/skills/install'
-      : `${import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:31002'}/api/system/skills/install`
+    const url = `${SYSTEM_API_BASE}/api/system/skills/install`
     const body: Record<string, string> = { name }
     if (source) body.source = source
     const resp = await axios.post(url, body, { timeout: 60000 })
@@ -145,9 +139,7 @@ export interface SearchSkillsResult {
 
 export async function searchClawHubSkills(query: string): Promise<SearchSkillsResult | null> {
   try {
-    const url = import.meta.env.DEV
-      ? '/api/system/skills/search'
-      : `${import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:31002'}/api/system/skills/search`
+    const url = `${SYSTEM_API_BASE}/api/system/skills/search`
     const resp = await axios.get(url, { params: { q: query }, timeout: 60000 }) // REC-013: 30s → 60s
     return resp.data as SearchSkillsResult
   } catch (e: unknown) {
@@ -175,9 +167,7 @@ export interface TaskProgress {
 
 export async function getTaskProgress(): Promise<TaskProgress | null> {
   try {
-    const url = import.meta.env.DEV
-      ? '/api/tasks/current'
-      : `${import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:31002'}/api/tasks/current`
+    const url = `${SYSTEM_API_BASE}/api/tasks/current`
     const resp = await axios.get(url, { timeout: 10000 })
     return resp.data as TaskProgress
   } catch {
@@ -200,9 +190,7 @@ export interface ToggleSkillResult {
 
 export async function toggleSkill(name: string, enabled: boolean): Promise<ToggleSkillResult | null> {
   try {
-    const url = import.meta.env.DEV
-      ? '/api/system/skills/toggle'
-      : `${import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:31002'}/api/system/skills/toggle`
+    const url = `${SYSTEM_API_BASE}/api/system/skills/toggle`
     const resp = await axios.post(url, { name, enabled }, { timeout: 60000 })
     return resp.data as ToggleSkillResult
   } catch (e: unknown) {

@@ -337,38 +337,28 @@ const agentId = computed(() => {
   return (parts[0] === 'agent' && parts.length >= 2) ? parts[1] : parts[0]
 })
 
-// 优先级：VITE_AGENT_{ID}_AVATAR env > /avatars/{id}.jpg > /avatars/{id}.png > 图标
+// 优先级：VITE_AGENT_{ID}_AVATAR env > 小头像资源 > 图标
 const envAvatar = computed(() => {
   const idUpper = agentId.value.replace(/-/g, '_').toUpperCase()
   const envKey = `VITE_AGENT_${idUpper}_AVATAR`
   return (import.meta.env as Record<string, string>)[envKey] || ''
 })
 
-// 两步降级：先试 .jpg，失败后试 .png，再失败才展示图标
-const avatarJpgFailed = ref(false)
-const avatarPngFailed = ref(false)
+const avatarFailed = ref(false)
 
 // agent 切换时重置
 watch(agentId, () => {
-  avatarJpgFailed.value = false
-  avatarPngFailed.value = false
+  avatarFailed.value = false
 })
 
-// 页面加载时生成一次版本号 → 每次刷新都能拿到最新头像，不被浏览器缓存卡住
-const AVATAR_VER = Date.now()
 const avatarSrc = computed(() => {
   if (envAvatar.value) return envAvatar.value
-  if (!avatarJpgFailed.value) return `/avatars/${agentId.value}.jpg?v=${AVATAR_VER}`
-  if (!avatarPngFailed.value) return `/avatars/${agentId.value}.png?v=${AVATAR_VER}`
+  if (!avatarFailed.value) return `/avatars/thumb/${agentId.value}.webp`
   return ''
 })
 
 function onAvatarError() {
-  if (!avatarJpgFailed.value) {
-    avatarJpgFailed.value = true   // .jpg 失败，下一次尝试 .png
-  } else {
-    avatarPngFailed.value = true   // .png 也失败，降级到图标
-  }
+  avatarFailed.value = true
 }
 
 // ========== 历史 Token ==========

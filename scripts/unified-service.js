@@ -35,6 +35,9 @@ const VOICE_PROFILES_FILE = path.join(VOICE_DATA_DIR, 'voices.json')
 // agent-full-history 的按文件解析缓存：path -> { mtimeMs, size, msgs:[...] }
 // 稳态下 3 秒轮询只需 stat 各文件，仅重读 mtime/size 变化的那个活跃文件
 const _agentHistFileCache = new Map()
+// agent-daily-summary 的按文件解析缓存：path -> { mtimeMs, size, date, session, searchText } | { empty }
+// 去掉条数上限后靠它扛"全部历史"：每个会话只解析一次，之后命中缓存，新文件才重读
+const _dailySumFileCache = new Map()
 
 // skill-readme 的技能 SKILL.md 路径缓存：skillName -> { skillDir, skillMdPath }
 // 避免内置技能每次都调 openclaw CLI 解析路径
@@ -134,7 +137,7 @@ async function backupDistOnStartup() {
     const backupPath = path.join(DASHBOARD_BACKUPS_DIR, backupName)
     await copyDirRecursive(DASHBOARD_DIST_DIR, backupPath)
     console.log(`[dist-backup] ✅ 已备份 dist v${version} → ${backupPath}`)
-    // 每个版本只保留最近 1 个备份，超出则删除该版本最旧的（避免同一版本堆积太多回退点）
+    // 每个版本只保留最近 3 个备份，超出则删除该版本最旧的（避免同一版本堆积太多回退点）
     const allEntries = await fs.readdir(DASHBOARD_BACKUPS_DIR).catch(() => [])
     const byVersion = {}
     for (const e of allEntries) {
@@ -2998,6 +3001,94 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ============================================
+  // GET /api/agent-stream?agentId=pm  （SSE 流式增量，替代 3 秒轮询）
+  //   盯该 agent 最新活跃 session 的 .jsonl，文件一追加新 message 就实时推送。
+  //   首屏历史仍走 /api/agent-full-history；本接口只推「连接之后」新增的消息。
+  //   纯新增接口；轮询接口原样保留做兜底，可随时回滚。
+  // ============================================
+  if (pathname === '/api/agent-stream' && req.method === 'GET') {
+    const agentId = String(url.searchParams.get('agentId') || url.searchParams.get('agent') || '').trim()
+    if (!agentId || !/^[a-zA-Z0-9_-]+$/.test(agentId)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'invalid agentId' }))
+      return
+    }
+    const sessionsDir = path.join(AGENTS_DIR, agentId, 'sessions')
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    })
+    res.write('retry: 3000\n\n')
+    res.write(`event: ready\ndata: ${JSON.stringify({ agentId })}\n\n`)
+
+    const pickActive = () => {
+      try {
+        const files = fsSync.readdirSync(sessionsDir)
+          .filter(f => f.endsWith('.jsonl') && !f.includes('.trajectory') && !f.includes('.reset') && !f.includes('.deleted') && !f.includes('.bak') && !f.includes('.tmp') && f !== 'sessions.json')
+          .map(f => { let mt = 0; try { mt = fsSync.statSync(path.join(sessionsDir, f)).mtimeMs } catch {} ; return { f, mt } })
+          .sort((a, b) => b.mt - a.mt)
+        return files.length ? files[0].f : null
+      } catch { return null }
+    }
+
+    let curFile = pickActive()
+    let offset = 0
+    if (curFile) { try { offset = fsSync.statSync(path.join(sessionsDir, curFile)).size } catch { offset = 0 } }
+
+    const flush = () => {
+      try {
+        const latest = pickActive()
+        if (latest && latest !== curFile) { curFile = latest; offset = 0 }
+        if (!curFile) return
+        const fp = path.join(sessionsDir, curFile)
+        let size = 0
+        try { size = fsSync.statSync(fp).size } catch { return }
+        if (size < offset) offset = 0       // 文件被截断/重写
+        if (size === offset) return
+        const fd = fsSync.openSync(fp, 'r')
+        const len = size - offset
+        const b = Buffer.alloc(len)
+        fsSync.readSync(fd, b, 0, len, offset)
+        fsSync.closeSync(fd)
+        let buf = b.toString('utf8')
+        offset = size
+        const parts = buf.split('\n')
+        if (!buf.endsWith('\n') && parts.length) {   // 最后一行可能没写完，留到下次
+          const tail = parts.pop()
+          offset -= Buffer.byteLength(tail, 'utf8')
+        }
+        for (const line of parts) {
+          const t = line.trim()
+          if (!t) continue
+          let o; try { o = JSON.parse(t) } catch { continue }
+          if (o.type !== 'message') continue
+          const m = o.message
+          if (!m || typeof m !== 'object' || !m.role) continue
+          res.write(`data: ${JSON.stringify({ message: m, timestamp: o.timestamp || m.timestamp || null, _session: curFile.replace('.jsonl', '') })}\n\n`)
+        }
+      } catch { /* 单次读取失败忽略，下次再试 */ }
+    }
+
+    let watcher = null
+    try {
+      watcher = fsSync.watch(sessionsDir, { persistent: false }, () => flush())
+    } catch { /* 某些文件系统不支持 watch，靠下面的轮询兜底 */ }
+    const pollTimer = setInterval(flush, 3000)   // fs.watch 兜底（fs.watch 已覆盖实时性，这里只是保险，放宽到 3s 减少后端 fs churn）
+    const hbTimer = setInterval(() => { try { res.write(': ping\n\n') } catch {} }, 15000)
+
+    const cleanup = () => {
+      clearInterval(pollTimer); clearInterval(hbTimer)
+      if (watcher) { try { watcher.close() } catch {} }
+    }
+    req.on('close', cleanup)
+    req.on('error', cleanup)
+    return
+  }
+
+  // ============================================
   // GET /api/session-detail?agentId=pm&sessionId=<uuid>
   //   解析单个 session 的 .jsonl，返回"这次会话到底做了什么"的步骤列表
   //   供活动时间线点击查看：用户提问 / 助手回复 / 工具调用 + 结果
@@ -3099,6 +3190,90 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ============================================
+  // GET /api/session-fulltext?agentId=&sessionId=
+  //   历史搜索"展开全文"：返回单个会话的完整原文（含 trajectory 里的输入/输出）
+  //   优先用刚搜索时写入的缓存（_dailySumFileCache），命中不到再现读现解析
+  // ============================================
+  if (pathname === '/api/session-fulltext' && req.method === 'GET') {
+    try {
+      const agentId = String(url.searchParams.get('agentId') || url.searchParams.get('agent') || '').trim()
+      const sessionId = String(url.searchParams.get('sessionId') || url.searchParams.get('session') || '').trim()
+      if (!agentId || !/^[a-zA-Z0-9_-]+$/.test(agentId) || !sessionId || !/^[a-zA-Z0-9_.-]+$/.test(sessionId)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: '参数不合法' }))
+        return
+      }
+      const dir = path.join(AGENTS_DIR, agentId, 'sessions')
+      const candidates = [
+        path.join(dir, `${sessionId}.trajectory.jsonl`),
+        path.join(dir, `${sessionId}.jsonl`),
+      ]
+      let fullText = ''
+      // 1) 先吃缓存（搜索刚跑完时是热的，直接拿到和搜索时一致的全文）
+      for (const fp of candidates) {
+        const c = _dailySumFileCache.get(fp)
+        if (c && typeof c.searchText === 'string' && c.searchText) { fullText = c.searchText; break }
+      }
+      // 2) 缓存没命中（进程重启 / 被清）→ 现读现解析（与 daily-summary 同一套抽取规则）
+      if (!fullText) {
+        const stripMeta = (s) => String(s || '')
+          .replace(/^[\s\S]{0,80}?\(untrusted metadata\)[\s\S]*?```[\s\S]*?```/i, '')
+          .replace(/\s+/g, ' ').trim()
+        for (const fp of candidates) {
+          let content = ''
+          try { content = fsSync.readFileSync(fp, 'utf8') } catch { continue }
+          const parts = []
+          const isTraj = fp.includes('.trajectory')
+          for (const line of content.split('\n')) {
+            const t = line.trim(); if (!t) continue
+            let o; try { o = JSON.parse(t) } catch { continue }
+            if (isTraj) {
+              if (o.type === 'prompt.submitted') { const x = stripMeta((o.data && o.data.prompt) || ''); if (x) parts.push(x) }
+              else if (o.type === 'model.completed') {
+                const d = o.data || {}
+                const out = typeof d.text === 'string' ? d.text : (typeof d.completion === 'string' ? d.completion : (typeof d.output === 'string' ? d.output : ''))
+                if (out && out.trim()) parts.push(out.trim())
+              }
+              continue
+            }
+            if (o.type !== 'message') continue
+            const m = o.message; if (!m || typeof m !== 'object') continue
+            const role = String(m.role || '').toLowerCase(); const c = m.content
+            if (role === 'user') {
+              const v = typeof c === 'string' ? c : (Array.isArray(c) ? c.map(p => (p && p.text) || '').join(' ') : '')
+              if (v.trim()) parts.push(v.trim())
+            } else if (role === 'assistant') {
+              if (typeof c === 'string') { if (c.trim()) parts.push(c.trim()) }
+              else if (Array.isArray(c)) for (const p of c) { if (p && p.type === 'text' && p.text && p.text.trim()) parts.push(p.text.trim()) }
+            }
+          }
+          if (parts.length) { fullText = parts.join('\n\n'); break }
+        }
+      }
+      if (!fullText) {
+        res.writeHead(404, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: '没找到这个会话的原文' }))
+        return
+      }
+      // 展示前清掉系统噪声：① "(untrusted metadata): ```...```" 元数据块；② 飞书 [message_id: om_xxx] 标签；③ ou_xxx 发送者 open_id 前缀
+      fullText = fullText
+        .replace(/[^\n]{0,60}?\(untrusted metadata\)[\s\S]*?```[\s\S]*?```/g, '')
+        .replace(/\[message_id:\s*om_[\w-]+\]\s*/g, '')
+        .replace(/\bou_[a-z0-9]{16,}\s*[:：]\s*/gi, '')
+        .replace(/[ \t]{2,}/g, ' ')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim()
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ agentId, sessionId, fullText }))
+    } catch (e) {
+      console.error('[session-fulltext] Error:', e.message)
+      res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: e.message || '读取失败' }))
+    }
+    return
+  }
+
+  // ============================================
   // GET /api/agent-daily-summary?agentId=pm&days=14
   //   按日期总结某 agent 的历史：每天有哪些会话、每条做了什么（任务→执行→结果）
   //   解决"翻历史太累"——直接看 agent 每天干了啥
@@ -3108,14 +3283,16 @@ const server = http.createServer(async (req, res) => {
       const agentId = String(url.searchParams.get('agentId') || url.searchParams.get('agent') || '').trim()
       let days = Number.parseInt(String(url.searchParams.get('days') || '14'), 10)
       if (!Number.isFinite(days) || days <= 0) days = 14
-      if (days > 90) days = 90
+      if (days > 180) days = 180
+      const q = String(url.searchParams.get('q') || '').trim()      // 关键词：在原始全文里搜（搜得到被总结掉的原文）
+      const qLower = q.toLowerCase()
       if (!agentId || !/^[a-zA-Z0-9_-]+$/.test(agentId)) {
         res.writeHead(400, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'invalid agentId', days: [] }))
         return
       }
 
-      const sessionsDir = path.join(AGENTS_DIR, agentId, 'sessions')
+      const allAgents = url.searchParams.get('allAgents') === '1' && !!qLower   // 仅「搜索时」才允许跨所有 agent
       const sinceMs = Date.now() - days * 86400000
       const CLIP = (s, n) => { s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n) + '…' : s }
       // 去掉飞书消息的 [message_id:...] / ou_xxx: 前缀，取真正内容
@@ -3135,76 +3312,120 @@ const server = http.createServer(async (req, res) => {
         } catch { return { date: '未知', time: '' } }
       }
 
-      let files = []
-      try {
-        files = fsSync.readdirSync(sessionsDir)
-          .filter(f => f.endsWith('.jsonl') && !f.includes('.trajectory') && !f.includes('.reset') &&
-            !f.includes('.deleted') && !f.includes('.bak') && !f.includes('.tmp') && f !== 'sessions.json')
-          .map(f => { let m = 0; try { m = fsSync.statSync(path.join(sessionsDir, f)).mtimeMs } catch {}; return { f, m } })
-          .filter(x => x.m >= sinceMs)
-          .sort((a, b) => b.m - a.m)
-      } catch {
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ agentId, days, totalSessions: 0, daysList: [] }))
-        return
+      // 要扫的 agent：跨 agent 搜索时扫全部，否则只当前这个
+      let agentIds = [agentId]
+      if (allAgents) {
+        try {
+          agentIds = fsSync.readdirSync(AGENTS_DIR, { withFileTypes: true })
+            .filter(d => d.isDirectory() && /^[a-zA-Z0-9_-]+$/.test(d.name))
+            .map(d => d.name)
+        } catch { /* 退回单 agent */ }
+      }
+      // 收集要解析的文件 {aid, dir, f, m}：搜索时无视时间范围(扫全部历史)，纯展示时才按 days 窗口
+      const fileJobs = []
+      for (const aid of agentIds) {
+        const dir = path.join(AGENTS_DIR, aid, 'sessions')
+        try {
+          const names = fsSync.readdirSync(dir).filter(f =>
+            f.endsWith('.jsonl') && !f.includes('.reset') && !f.includes('.deleted') &&
+            !f.includes('.bak') && !f.includes('.tmp') && f !== 'sessions.json')
+          // 按 uuid 去重：同一会话优先用消息版(.jsonl)，只有轨迹版(.trajectory.jsonl)的才解析轨迹版（"主角小队"这类只有轨迹版）
+          const byUuid = new Map()
+          for (const f of names) {
+            const isTraj = f.includes('.trajectory')
+            const uuid = f.replace('.trajectory', '').replace('.jsonl', '')
+            const cur = byUuid.get(uuid)
+            if (!cur || (cur.isTraj && !isTraj)) byUuid.set(uuid, { f, isTraj })
+          }
+          for (const { f } of byUuid.values()) {
+            let m = 0; try { m = fsSync.statSync(path.join(dir, f)).mtimeMs } catch {}
+            if (!qLower && m < sinceMs) continue   // 纯展示按时间窗口；搜索时全量、不受窗口限制
+            fileJobs.push({ aid, dir, f, m })
+          }
+        } catch { /* 该 agent 没有 sessions 目录，跳过 */ }
+      }
+      fileJobs.sort((a, b) => b.m - a.m)
+
+      // 不再砍上限：每个会话文件按 mtime+size 缓存解析结果，"全部"也扛得住（首次解析，之后命中缓存；新文件才重读）
+      const truncated = false
+      const byDate = {} // date -> [session]
+      const TOOL_ZH = {
+        bash: '终端命令', shell: '终端命令', exec: '终端命令',
+        apply_patch: '修改文件', edit: '修改文件', str_replace: '修改文件',
+        read: '读取文件', read_file: '读取文件', cat: '读取文件',
+        write: '写入文件', write_file: '写入文件', create_file: '写入文件',
+        web_search: '联网搜索', browser: '浏览网页', fetch: '抓取网页',
+        sessions_send: '发送消息', message: '发送飞书消息', im: '发送飞书消息',
+        cron: '定时任务', task: '任务操作', glob: '查找文件', grep: '搜索内容',
       }
 
-      const MAX_FILES = 400
-      const truncated = files.length > MAX_FILES
-      const use = files.slice(0, MAX_FILES)
-      const byDate = {} // date -> [session]
-
-      for (const { f } of use) {
+      const parseSession = (dir, f, mtimeMs, aid) => {
+        const fp = path.join(dir, f)
+        let size = 0
+        try { size = fsSync.statSync(fp).size } catch {}
+        const cached = _dailySumFileCache.get(fp)
+        if (cached && cached.mtimeMs === mtimeMs && cached.size === size) return cached
         let content = ''
-        try { content = fsSync.readFileSync(path.join(sessionsDir, f), 'utf8') } catch { continue }
-        let firstTs = null, lastTs = null, firstUser = '', lastAssistant = '', model = ''
+        try { content = fsSync.readFileSync(fp, 'utf8') } catch { return null }
+        let firstTs = null, firstUser = '', lastAssistant = '', model = ''
         const toolCounts = {}
-        let stepCount = 0
+        const allParts = []   // 原始全文（给关键词搜索用）
+        const isTraj = f.includes('.trajectory')
+        // 去掉开头任意"xxx (untrusted metadata): ```json {...}```"元数据块（Conversation info / Sender 等都覆盖）
+        const stripMeta = (s) => cleanMsg(String(s || '').replace(/^[\s\S]{0,80}?\(untrusted metadata\)[\s\S]*?```[\s\S]*?```/i, '').trim())
         for (const line of content.split('\n')) {
           const t = line.trim()
           if (!t) continue
           let o; try { o = JSON.parse(t) } catch { continue }
+          if (isTraj) {
+            // 轨迹文件只有 trace 类型：取 prompt.submitted(你的输入)+model.completed(助手输出)；避开 context.compiled(整段上下文,会污染搜索)
+            if (o.type === 'prompt.submitted') {
+              const txt = stripMeta((o.data && o.data.prompt) || '')
+              if (txt) { allParts.push(txt); if (!firstUser) firstUser = txt }
+              if (!firstTs) firstTs = o.ts || o.timestamp || null
+              if (!model && o.modelId) model = o.modelId
+            } else if (o.type === 'model.completed') {
+              const d = o.data || {}
+              const out = typeof d.text === 'string' ? d.text : (typeof d.completion === 'string' ? d.completion : (typeof d.output === 'string' ? d.output : ''))
+              if (out && out.trim()) { lastAssistant = out; allParts.push(out) }
+              if (!firstTs) firstTs = o.ts || o.timestamp || null
+            }
+            continue
+          }
           if (o.type === 'model_change' && o.model) { model = o.model; continue }
           if (o.type !== 'message') continue
           const m = o.message; if (!m || typeof m !== 'object') continue
           const ts = o.timestamp || m.timestamp || null
-          if (ts) { if (!firstTs) firstTs = ts; lastTs = ts }
+          if (ts && !firstTs) firstTs = ts
           if (!model && m.model) model = m.model
           const role = String(m.role || '').toLowerCase()
           const c = m.content
           if (role === 'user') {
-            stepCount++
-            if (!firstUser) { const v = typeof c === 'string' ? c : (Array.isArray(c) ? c.map(p => (p && p.text) || '').join(' ') : ''); firstUser = cleanMsg(v) }
+            const v = typeof c === 'string' ? c : (Array.isArray(c) ? c.map(p => (p && p.text) || '').join(' ') : '')
+            const cv = cleanMsg(v)
+            if (cv) allParts.push(cv)
+            if (!firstUser) firstUser = cv
           } else if (role === 'assistant') {
-            stepCount++
-            if (typeof c === 'string') { if (c.trim()) lastAssistant = c }
+            if (typeof c === 'string') { if (c.trim()) { lastAssistant = c; allParts.push(c) } }
             else if (Array.isArray(c)) {
               for (const p of c) {
                 if (!p || typeof p !== 'object') continue
-                if (p.type === 'text' && p.text && p.text.trim()) lastAssistant = p.text
+                if (p.type === 'text' && p.text && p.text.trim()) { lastAssistant = p.text; allParts.push(p.text) }
                 else if (p.type === 'toolCall') { const n = p.name || '工具'; toolCounts[n] = (toolCounts[n] || 0) + 1 }
               }
             }
           }
         }
-        if (!firstTs) continue
+        if (!firstTs && firstUser) firstTs = mtimeMs   // 轨迹文件没拿到 ts 时用文件修改时间兜底
+        if (!firstTs) { const e = { mtimeMs, size, empty: true }; _dailySumFileCache.set(fp, e); return e }
         const { date, time } = localParts(firstTs)
         const tools = Object.entries(toolCounts).sort((a, b) => b[1] - a[1])
-        const TOOL_ZH = {
-          bash: '终端命令', shell: '终端命令', exec: '终端命令',
-          apply_patch: '修改文件', edit: '修改文件', str_replace: '修改文件',
-          read: '读取文件', read_file: '读取文件', cat: '读取文件',
-          write: '写入文件', write_file: '写入文件', create_file: '写入文件',
-          web_search: '联网搜索', browser: '浏览网页', fetch: '抓取网页',
-          sessions_send: '发送消息', message: '发送飞书消息', im: '发送飞书消息',
-          cron: '定时任务', task: '任务操作', glob: '查找文件', grep: '搜索内容',
-        }
         const toolSummary = tools.map(([n, c]) => `${TOOL_ZH[String(n).toLowerCase()] || n} ${c}次`).join('、')
         const totalTools = tools.reduce((s, [, c]) => s + c, 0)
-        // 触发类型：cron/系统型 first message 多以"执行/巡检/归档/检查"开头或含 NO_REPLY 约定
         const isCron = /^执行|巡检|归档|检查|定时|cron|每日|汇总/.test(firstUser) || /NO_REPLY/.test(firstUser)
         const session = {
-          sessionId: f.replace('.jsonl', ''),
+          sessionId: f.replace('.trajectory', '').replace('.jsonl', ''),
+          agentId: aid,
           time,
           trigger: isCron ? 'cron' : 'user',
           task: CLIP(firstUser, 110) || '(无触发消息)',
@@ -3213,8 +3434,29 @@ const server = http.createServer(async (req, res) => {
           result: CLIP(lastAssistant, 140) || '（无文字回复）',
           model,
         }
-        if (!byDate[date]) byDate[date] = []
-        byDate[date].push(session)
+        let searchText = allParts.join('  ')
+        if (searchText.length > 60000) searchText = searchText.slice(0, 60000)  // 限长防内存膨胀
+        const entry = { mtimeMs, size, date, session, searchText }
+        _dailySumFileCache.set(fp, entry)
+        return entry
+      }
+
+      for (const job of fileJobs) {
+        const entry = parseSession(job.dir, job.f, job.m, job.aid)
+        if (!entry || entry.empty) continue
+        let session = entry.session
+        if (qLower) {
+          // 关键词在原始全文里搜（搜得到被 AI 总结掉的原文），命中才保留 + 给原文片段
+          const pos = entry.searchText.toLowerCase().indexOf(qLower)
+          if (pos < 0) continue
+          const start = Math.max(0, pos - 30)
+          const snippet = (start > 0 ? '…' : '') + entry.searchText.slice(start, pos + q.length + 60).replace(/\s+/g, ' ').trim() + '…'
+          session = { ...session, snippet }
+        } else {
+          session = { ...session, snippet: '' }
+        }
+        if (!byDate[entry.date]) byDate[entry.date] = []
+        byDate[entry.date].push(session)
       }
 
       const daysList = Object.keys(byDate).sort((a, b) => b.localeCompare(a)).map(date => {
@@ -3222,11 +3464,13 @@ const server = http.createServer(async (req, res) => {
         return { date, sessionCount: sessions.length, totalTools: sessions.reduce((s, x) => s + x.toolCount, 0), sessions }
       })
 
+      const totalSessions = daysList.reduce((s, d) => s + d.sessionCount, 0)   // 真实展示条数（含关键词命中过滤后）
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({
-        agentId, days,
-        totalSessions: use.length,
-        scannedFiles: use.length,
+        agentId, days, q,
+        totalSessions,
+        scannedFiles: fileJobs.length,
+        allAgents,
         truncated,
         daysList,
       }))
@@ -3327,6 +3571,54 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ============================================
+  // GET /api/agent-latest-reply?agentId=  — 轻量取"最新一条 assistant 完整文本回复"(+时间戳)
+  //   只读最近 session 文件末尾(不聚合全量历史)，专给语音通话快速检测回复用，避免每次拉 1500 条
+  // ============================================
+  if (pathname === '/api/agent-latest-reply' && req.method === 'GET') {
+    const agentId = (url.searchParams.get('agentId') || url.searchParams.get('agent') || 'main').trim()
+    try {
+      if (!/^[a-zA-Z0-9_-]+$/.test(agentId)) { sendJson(res, 400, { error: '参数不合法' }); return }
+      const sessionsDir = path.join(AGENTS_DIR, agentId, 'sessions')
+      let latestFile = null, latestMtime = 0
+      try {
+        for (const f of fsSync.readdirSync(sessionsDir)) {
+          if (!f.endsWith('.jsonl') || f.includes('.trajectory') || f.includes('.reset') || f.includes('.bak') || f.includes('.tmp') || f === 'sessions.json') continue
+          const st = fsSync.statSync(path.join(sessionsDir, f))
+          if (st.mtimeMs > latestMtime) { latestMtime = st.mtimeMs; latestFile = path.join(sessionsDir, f) }
+        }
+      } catch { /* no dir */ }
+      if (!latestFile) { sendJson(res, 200, { agentId, text: '', ts: null }); return }
+      // 读末尾 64KB（足够覆盖一条完整回复）
+      const READ_TAIL = 64 * 1024
+      const st = fsSync.statSync(latestFile)
+      const start = Math.max(0, st.size - READ_TAIL)
+      const buf = Buffer.alloc(Math.min(READ_TAIL, st.size))
+      const fd = fsSync.openSync(latestFile, 'r')
+      fsSync.readSync(fd, buf, 0, buf.length, start)
+      fsSync.closeSync(fd)
+      const rawLines = buf.toString('utf-8').split('\n')
+      const lines = start > 0 ? rawLines.slice(1) : rawLines   // 截断偏移时丢首行残片
+      let latestText = '', latestTs = null
+      for (const line of lines) {
+        const t = line.trim(); if (!t) continue
+        let o; try { o = JSON.parse(t) } catch { continue }
+        if (o.type !== 'message' || !o.message || o.message.role !== 'assistant') continue
+        const parts = Array.isArray(o.message.content) ? o.message.content
+          : (typeof o.message.content === 'string' ? [{ type: 'text', text: o.message.content }] : [])
+        let txt = ''
+        for (const p of parts) { if (p && p.type === 'text' && p.text) txt += p.text }
+        txt = txt.trim()
+        if (!txt || txt === 'NO_REPLY' || /^无需回复/.test(txt) || /^模型连通正常/.test(txt)) continue
+        latestText = txt; latestTs = o.timestamp || o.message.timestamp || null   // 保留到最后一条 = 最新
+      }
+      sendJson(res, 200, { agentId, text: latestText, ts: latestTs })
+    } catch (e) {
+      sendJson(res, 500, { error: e.message })
+    }
+    return
+  }
+
+  // ============================================
   // POST /api/agent-send-message — 通过 openclaw CLI 发消息给 agent
   // body: { agentId: string, message: string }
   // ============================================
@@ -3362,6 +3654,134 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ============================================
+  // GET  /api/agent-model?agentId=main        — 当前主模型 + 可选模型列表
+  // POST /api/agent-set-model {agentId,model}  — 切换主模型：备份 openclaw.json → 写入 model.primary → 给该 agent 发 /reset 轻量重载
+  // ============================================
+  if (pathname === '/api/agent-model' && req.method === 'GET') {
+    try {
+      const agentId = String(url.searchParams.get('agentId') || '').trim()
+      const cfg = JSON.parse(fsSync.readFileSync(path.join(OPENCLAW_DIR, 'openclaw.json'), 'utf8'))
+      const prov = (cfg.models && cfg.models.providers) || {}
+      const options = []
+      for (const [pid, pv] of Object.entries(prov)) {
+        const ms = (pv && pv.models) || []
+        const arr = Array.isArray(ms) ? ms : Object.entries(ms).map(([id, m]) => ({ id, ...(m || {}) }))
+        for (const m of arr) {
+          const mid = (m && m.id) || m
+          if (!mid) continue
+          options.push({ value: `${pid}/${mid}`, label: (m && m.name) ? m.name : String(mid) })
+        }
+      }
+      let current = ''
+      const list = (cfg.agents && cfg.agents.list) || []
+      const a = list.find(x => x && x.id === agentId)
+      if (a && a.model) current = a.model.primary || ''
+      sendJson(res, 200, { agentId, current, options })
+    } catch (e) { sendJson(res, 500, { error: e.message }) }
+    return
+  }
+  if (pathname === '/api/agent-set-model' && req.method === 'POST') {
+    let body = ''
+    req.on('data', c => { body += c })
+    req.on('end', () => {
+      try {
+        const { agentId, model } = JSON.parse(body || '{}')
+        if (!agentId || !model) { sendJson(res, 400, { error: 'agentId 和 model 必填' }); return }
+        const cfgPath = path.join(OPENCLAW_DIR, 'openclaw.json')
+        const raw = fsSync.readFileSync(cfgPath, 'utf8')
+        const cfg = JSON.parse(raw)
+        const prov = (cfg.models && cfg.models.providers) || {}
+        const valid = []
+        for (const [pid, pv] of Object.entries(prov)) {
+          const ms = pv && pv.models
+          const ids = Array.isArray(ms) ? ms.map(m => (m && m.id) || m) : (ms && typeof ms === 'object' ? Object.keys(ms) : [])
+          for (const mid of ids) valid.push(`${pid}/${mid}`)
+        }
+        if (!valid.includes(model)) { sendJson(res, 400, { error: '未知模型: ' + model }); return }
+        const list = (cfg.agents && cfg.agents.list) || []
+        const a = list.find(x => x && x.id === agentId)
+        if (!a) { sendJson(res, 404, { error: '找不到该 agent: ' + agentId }); return }
+        // 先备份再写（可随时回滚）
+        const bak = cfgPath + '.bak_model_' + Date.now()
+        fsSync.writeFileSync(bak, raw)
+        if (!a.model || typeof a.model !== 'object') a.model = {}
+        a.model.primary = model
+        fsSync.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2))
+        // 轻量重载：给该 agent 发 /reset，让它按新模型重载（不重启整个网关）
+        try {
+          const child = spawn('openclaw', ['agent', '--agent', agentId, '--message', '/reset', '--session-key', `agent:${agentId}:main`], { detached: true, stdio: 'ignore' })
+          child.unref()
+        } catch { /* reset 失败不影响配置已写入，下次启动也会生效 */ }
+        console.log(`[agent-set-model] ${agentId} → ${model}（已备份 ${path.basename(bak)}）`)
+        sendJson(res, 200, { ok: true, agentId, model, backup: path.basename(bak) })
+      } catch (e) { sendJson(res, 500, { error: e.message }) }
+    })
+    return
+  }
+
+  // ============================================
+  // POST /api/quick-chat  — Lumi 式"直连快速对话"：后端直接连模型 API 流式输出，
+  //   完全绕开 OpenClaw 网关和重型 agent。请求体 { message, model?:"provider/id", agentId?, system? }
+  //   返回 OpenAI 风格 SSE(text/event-stream)，前端逐字渲染。这是真正能做到"说完秒回、像聊天"的通道。
+  // ============================================
+  if (pathname === '/api/quick-chat' && req.method === 'POST') {
+    let body = ''
+    req.on('data', c => { body += c })
+    req.on('end', async () => {
+      try {
+        const { message, messages: msgsArg, model: modelArg, agentId, system } = JSON.parse(body || '{}')
+        // 支持两种：① 直接传 messages 数组(带多轮记忆)；② 传 message(+可选 system) 单轮
+        const chatMessages = Array.isArray(msgsArg) && msgsArg.length
+          ? msgsArg.filter(m => m && m.role && typeof m.content === 'string')
+          : [...(system ? [{ role: 'system', content: String(system) }] : []), { role: 'user', content: String(message || '') }]
+        if (!chatMessages.length || !chatMessages.some(m => m.role === 'user' && m.content.trim())) {
+          sendJson(res, 400, { error: 'message / messages 必填' }); return
+        }
+        const cfg = JSON.parse(fsSync.readFileSync(path.join(OPENCLAW_DIR, 'openclaw.json'), 'utf8'))
+        const prov = (cfg.models && cfg.models.providers) || {}
+        // 选模型：显式 model 优先 → 否则用该 agent 的 primary → 否则报错
+        let target = modelArg
+        if (!target && agentId) { const a = (cfg.agents?.list || []).find(x => x && x.id === agentId); target = a?.model?.primary }
+        if (!target) { sendJson(res, 400, { error: '未指定模型' }); return }
+        const slash = target.indexOf('/')
+        const pid = slash > 0 ? target.slice(0, slash) : target
+        const mid = slash > 0 ? target.slice(slash + 1) : target
+        const pv = prov[pid]
+        if (!pv) { sendJson(res, 400, { error: '未知 provider: ' + pid }); return }
+        const baseUrl = String(pv.baseUrl || pv.baseURL || '').replace(/\/$/, '')
+        const apiKey = pv.apiKey || pv.api_key || pv.key || ''
+        if (!baseUrl || !apiKey) { sendJson(res, 400, { error: 'provider 缺少 baseUrl/apiKey' }); return }
+        const upstream = await fetch(`${baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: mid,
+            messages: chatMessages,
+            stream: true,
+          }),
+        })
+        if (!upstream.ok || !upstream.body) {
+          const t = await upstream.text().catch(() => '')
+          sendJson(res, 502, { error: '模型连接失败: ' + (t.slice(0, 200) || ('HTTP ' + upstream.status)) })
+          return
+        }
+        res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' })
+        const reader = upstream.body.getReader()
+        const dec = new TextDecoder()
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          res.write(dec.decode(value, { stream: true }))   // 直接透传上游 OpenAI 风格 SSE
+        }
+        res.end()
+      } catch (e) {
+        try { sendJson(res, 500, { error: e.message }) } catch { try { res.end() } catch {} }
+      }
+    })
+    return
+  }
+
+  // ============================================
   // Voice local deployment helpers
   // GET  /api/voice/capabilities
   // GET  /api/voice/voices
@@ -3388,6 +3808,7 @@ const server = http.createServer(async (req, res) => {
         premade: COSYVOICE_PRESET_VOICES,
         providers: {
           cosyvoice: Boolean(dashscopeApiKey()),
+          minimax: minimaxConfigured(),
           gptsovits: Boolean(gptSoVitsUrl()),
           command: ttsCommandConfigured(),
         },
@@ -6636,6 +7057,93 @@ const server = http.createServer(async (req, res) => {
   res.writeHead(404, { 'Content-Type': 'application/json' })
   res.end(JSON.stringify({ error: 'Not found' }))
 })
+
+// ============================================
+// 实时语音识别桥：浏览器 PCM ↔ 阿里 paraformer-realtime（"边说边识别"，替代整段批量 qwen3-asr）
+//   前端连 ws://.../api/voice/asr-stream，持续推 16k/16bit/单声道 PCM 二进制帧；
+//   本桥转给阿里实时 ASR，把识别结果(中间态 + 整句) JSON 回推前端。纯新增，批量识别接口保留做兜底。
+// ============================================
+try {
+  const _ws = await import('ws')
+  const WebSocketServer = _ws.WebSocketServer
+  const WsClient = _ws.WebSocket || _ws.default
+  const asrWss = new WebSocketServer({ noServer: true })
+
+  server.on('upgrade', (req, socket, head) => {
+    let pathname = '/'
+    try { pathname = new URL(req.url, 'http://localhost').pathname } catch { /* noop */ }
+    if (pathname === '/api/voice/asr-stream') {
+      asrWss.handleUpgrade(req, socket, head, (ws) => asrWss.emit('connection', ws, req))
+    } else {
+      try { socket.destroy() } catch { /* noop */ }
+    }
+  })
+
+  asrWss.on('connection', (client) => {
+    const apiKey = dashscopeApiKey()
+    if (!apiKey) {
+      try { client.send(JSON.stringify({ type: 'error', error: '未配置 DashScope key，无法用实时识别' })); client.close() } catch { /* noop */ }
+      return
+    }
+    const taskId = ((globalThis.crypto && globalThis.crypto.randomUUID) ? globalThis.crypto.randomUUID() : (Date.now() + Math.random().toString(16).slice(2))).replace(/-/g, '')
+    const model = process.env.OPENCLAW_VOICE_ASR_REALTIME_MODEL || 'paraformer-realtime-v2'
+    let dashReady = false, closed = false
+    const pending = []
+
+    const dash = new WsClient('wss://dashscope.aliyuncs.com/api-ws/v1/inference/', {
+      headers: { Authorization: `bearer ${apiKey}`, 'X-DashScope-DataInspection': 'enable' },
+    })
+    const sendClient = (obj) => { try { client.send(JSON.stringify(obj)) } catch { /* noop */ } }
+    const finishDash = () => { try { if (dash.readyState === WsClient.OPEN) dash.send(JSON.stringify({ header: { action: 'finish-task', task_id: taskId, streaming: 'duplex' }, payload: { input: {} } })) } catch { /* noop */ } }
+    const closeAll = () => { if (closed) return; closed = true; try { dash.close() } catch {} ; try { client.close() } catch {} }
+
+    dash.on('open', () => {
+      try {
+        dash.send(JSON.stringify({
+          header: { action: 'run-task', task_id: taskId, streaming: 'duplex' },
+          payload: { task_group: 'audio', task: 'asr', function: 'recognition', model, parameters: { format: 'pcm', sample_rate: 16000 }, input: {} },
+        }))
+      } catch { closeAll() }
+    })
+    dash.on('message', (data, isBinary) => {
+      if (isBinary) return
+      let ev; try { ev = JSON.parse(data.toString()) } catch { return }
+      const name = ev?.header?.event
+      if (name === 'task-started') {
+        dashReady = true
+        for (const buf of pending) { try { dash.send(buf) } catch {} }
+        pending.length = 0
+        sendClient({ type: 'ready' })
+      } else if (name === 'result-generated') {
+        const s = ev?.payload?.output?.sentence
+        const text = (s && s.text) || ''
+        if (text) sendClient({ type: 'transcript', text, isFinal: s.sentence_end === true })
+      } else if (name === 'task-finished') {
+        closeAll()
+      } else if (name === 'task-failed') {
+        sendClient({ type: 'error', error: ev?.header?.error_message || '实时识别失败' })
+        closeAll()
+      }
+    })
+    dash.on('error', (e) => { sendClient({ type: 'error', error: String((e && e.message) || e) }); closeAll() })
+    dash.on('close', () => closeAll())
+
+    client.on('message', (data, isBinary) => {
+      if (!isBinary) {
+        let msg = null; try { msg = JSON.parse(data.toString()) } catch { /* noop */ }
+        if (msg && msg.action === 'finish') finishDash()
+        return
+      }
+      if (dashReady && dash.readyState === WsClient.OPEN) { try { dash.send(data) } catch {} }
+      else { pending.push(data); if (pending.length > 300) pending.shift() }
+    })
+    client.on('close', () => { finishDash(); closeAll() })
+    client.on('error', () => closeAll())
+  })
+  console.log('[实时识别] /api/voice/asr-stream WebSocket 已挂载（阿里 paraformer-realtime）')
+} catch (e) {
+  console.warn('[实时识别] 初始化失败，仅保留批量识别：', e && e.message)
+}
 
 server.listen(PORT, () => {
   console.log('='.repeat(50))

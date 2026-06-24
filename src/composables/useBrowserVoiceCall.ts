@@ -165,6 +165,11 @@ export function useBrowserVoiceCall(options: UseBrowserVoiceCallOptions) {
 
   const isActive = computed(() => callState.value !== 'idle')
 
+  // 「打字→朗读回复」轻量模式：只念回复，不开麦、不改变语音通话浮层状态(callState 保持 idle)
+  const replyTtsActive = ref(false)
+  // 允许出声的条件：正在语音通话 OR 处于朗读回复模式
+  const speechAllowed = computed(() => isActive.value || replyTtsActive.value)
+
   function clearPassiveTimer() {
     if (passiveTimer) {
       clearTimeout(passiveTimer)
@@ -237,6 +242,8 @@ export function useBrowserVoiceCall(options: UseBrowserVoiceCallOptions) {
   }
 
   function stopSpeech() {
+    // 打断/新一轮：清空待念队列，别再继续念旧内容
+    try { speechQueue.length = 0 } catch { /* 队列可能尚未初始化 */ }
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel()
     }
@@ -300,6 +307,7 @@ export function useBrowserVoiceCall(options: UseBrowserVoiceCallOptions) {
 
   // 合成一句，返回音频 blob（不播放）
   async function synthOneSentence(text: string, settings: AgentVoiceSettings): Promise<Blob> {
+    const t0 = Date.now()
     const resp = await fetch('/api/voice/synthesize', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -319,6 +327,7 @@ export function useBrowserVoiceCall(options: UseBrowserVoiceCallOptions) {
     if (!contentType.startsWith('audio/')) throw new Error('后端没有返回音频数据')
     const blob = await resp.blob()
     if (!blob.size) throw new Error('后端返回了空音频')
+    console.log(`[voice TTS] 合成完成 ${Date.now()-t0}ms "${text.slice(0,20)}"`)
     return blob
   }
 
@@ -353,6 +362,114 @@ export function useBrowserVoiceCall(options: UseBrowserVoiceCallOptions) {
       if (blob) { try { await playOneBlob(blob) } catch { break } }
     }
     return true
+  }
+
+  // ── 流式语音队列：句子一来就合成播放（配合"边生成边念"，声音追着文字走，不再整段等完）──
+  // 核心优化：每句入队时立刻并行启动合成，不等轮到再合成，消除句间停顿
+  type SpeechItem = { text: string; blobP: Promise<Blob | null> | null }
+  const speechQueue: SpeechItem[] = []
+  let speechActive = false
+  let speechDonePromise: Promise<void> = Promise.resolve()
+  let speechDoneResolve: (() => void) | null = null
+  // 缓存本次通话的 TTS 设置——使第 2+ 句入队时可立刻并行合成（无需等待 IIFE 取到设置）
+  let _speechSettings: AgentVoiceSettings | null = null
+  let _speechUseBackend = false
+
+  function enqueueSpeech(text: string): void {
+    const t = (text || '').trim()
+    console.log(`[🔊 enqueue] 调用 speechAllowed=${speechAllowed.value} callState=${callState.value} text="${t.slice(0,30)}"`)
+    if (!t || !speechAllowed.value) { console.warn('[🔊 enqueue] 跳过：文本空或未在通话/朗读模式'); return }
+
+    // 若设置已缓存（本次通话第一句处理完后），入队即并行启动合成
+    const immediateBlob = _speechUseBackend && _speechSettings
+      ? synthOneSentence(t, _speechSettings).catch(() => null)
+      : null
+    if (immediateBlob) console.log(`[🔊 enqueue] 立刻预合成 "${t.slice(0, 20)}"`)
+    speechQueue.push({ text: t, blobP: immediateBlob })
+
+    if (speechActive) { console.log('[🔊 enqueue] 已入队，后台正在合成中'); return }
+    speechActive = true
+    // 仅在真正语音通话时改浮层状态；朗读回复模式保持 idle（不弹通话界面）
+    if (isActive.value) callState.value = 'speaking'
+    speechDonePromise = new Promise<void>(res => { speechDoneResolve = res })
+    void (async () => {
+      const settings = options.getVoiceSettings?.() || null
+      const useBackend = !!(settings && settings.provider === 'backend' && settings.backendVoiceId
+        && await backendVoiceProviderReady(settings.backendProvider))
+      // 设置缓存写入，让后续 enqueueSpeech 调用立刻并行合成
+      _speechSettings = settings
+      _speechUseBackend = useBackend
+      console.log(`[🔊 enqueue] useBackend=${useBackend} provider=${settings?.provider} voiceId=${settings?.backendVoiceId?.slice(0, 20)}`)
+
+      // 第一句入队时设置还没缓存，没有预合成——现在补启动
+      if (speechQueue.length > 0 && speechQueue[0].blobP === null && useBackend && settings) {
+        speechQueue[0].blobP = synthOneSentence(speechQueue[0].text, settings).catch(() => null)
+        console.log(`[🔊 enqueue] 补启第一句合成 "${speechQueue[0].text.slice(0, 20)}"`)
+      }
+
+      try {
+        while (speechQueue.length) {
+          if (!speechAllowed.value || isMuted.value) { speechQueue.length = 0; break }
+          const item = speechQueue.shift()!
+          if (useBackend && settings) {
+            // 使用预合成结果（可能已与上一句播放并行完成），否则现合
+            const blobP = item.blobP ?? synthOneSentence(item.text, settings).catch(() => null)
+
+            // 立刻为队列里下一句启动预合成（若还没启动）——与当前句等待/播放并行
+            const nextItem = speechQueue[0]
+            if (nextItem && !nextItem.blobP) {
+              nextItem.blobP = synthOneSentence(nextItem.text, settings).catch(() => null)
+              console.log(`[🔊 enqueue] 预合成下一句 "${nextItem.text.slice(0, 20)}"`)
+            }
+
+            const blob = await blobP
+
+            // await 期间可能有新句子入队，补一次预合成检查
+            if (speechQueue[0] && !speechQueue[0].blobP) {
+              speechQueue[0].blobP = synthOneSentence(speechQueue[0].text, settings).catch(() => null)
+              console.log(`[🔊 enqueue] await 后补预合成 "${speechQueue[0].text.slice(0, 20)}"`)
+            }
+
+            if (blob && speechAllowed.value && !isMuted.value) {
+              console.log(`[🔊 enqueue] 开始播放后端音频 ${blob.size}bytes`)
+              try { await playOneBlob(blob) } catch { /* 忽略单句失败 */ }
+            }
+
+            // 播放期间可能又有新句子入队，再补一次
+            if (speechQueue[0] && !speechQueue[0].blobP) {
+              speechQueue[0].blobP = synthOneSentence(speechQueue[0].text, settings).catch(() => null)
+              console.log(`[🔊 enqueue] 播完补预合成 "${speechQueue[0].text.slice(0, 20)}"`)
+            }
+          } else {
+            await speak(item.text, { showSpeakingState: false })
+          }
+        }
+      } finally {
+        speechActive = false
+        _speechSettings = null
+        _speechUseBackend = false
+        const r = speechDoneResolve; speechDoneResolve = null
+        if (r) r()
+      }
+    })()
+  }
+  // 等待队列里所有句子念完
+  function flushSpeech(): Promise<void> {
+    return speechActive ? speechDonePromise : Promise.resolve()
+  }
+
+  // ── 「打字→朗读回复」：开启/关闭轻量朗读模式（不开麦、不弹通话浮层）──
+  // 用法：发消息前 startReplySpeech() → 流式回复逐句 enqueueSpeech() → await flushSpeech() → stopReplySpeech()
+  function startReplySpeech(): void {
+    // 打断上一条还没念完的回复，清掉旧队列
+    if (replyTtsActive.value || speechActive) stopSpeech()
+    replyTtsActive.value = true
+    console.log('[🔊 朗读] 开启朗读回复模式')
+  }
+  function stopReplySpeech(): void {
+    replyTtsActive.value = false
+    stopSpeech()
+    console.log('[🔊 朗读] 关闭朗读回复模式')
   }
 
   async function speak(text: string, speakOptions: { showSpeakingState?: boolean } = {}): Promise<void> {
@@ -427,7 +544,7 @@ export function useBrowserVoiceCall(options: UseBrowserVoiceCallOptions) {
   }
 
   async function announceReady() {
-    await speak('语音已连接，我在听。', { showSpeakingState: false })
+    // 不再播报"语音已连接,我在听"那句机械音；界面状态切到"正在听"即可
     if (!isActive.value) return
     callState.value = 'listening'
     armPassiveTimer()
@@ -693,6 +810,92 @@ export function useBrowserVoiceCall(options: UseBrowserVoiceCallOptions) {
     return rec
   }
 
+  // ===== 实时流式识别（阿里 paraformer-realtime，"边说边出字"，优先于整段批量上传）=====
+  let asrWs: WebSocket | null = null
+  let asrAudioContext: AudioContext | null = null
+  let asrProcessor: ScriptProcessorNode | null = null
+  let asrSource: MediaStreamAudioSourceNode | null = null
+  let usingStreamingAsr = false
+  let asrCurSentence = ''
+  let streamingFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+  function armStreamingFlush() {
+    if (streamingFlushTimer) clearTimeout(streamingFlushTimer)
+    streamingFlushTimer = setTimeout(() => {
+      streamingFlushTimer = null
+      const t = (browserBuffer + asrCurSentence).trim()
+      browserBuffer = ''; asrCurSentence = ''
+      if (t) void handleFinalTranscript(t)
+    }, END_SILENCE_MS)
+  }
+
+  function onStreamingTranscript(text: string, isFinal: boolean) {
+    if (!text) return
+    asrCurSentence = text
+    const shown = (browserBuffer + asrCurSentence).trim()
+    transcript.value = shown
+    options.onTranscript?.(shown, false)
+    if (callState.value === 'passive') callState.value = 'listening'
+    if (isFinal) { browserBuffer += text; asrCurSentence = '' }
+    armStreamingFlush()   // 静默 1.3s 没新内容 → 整段发给 Agent
+  }
+
+  function startPcmCapture() {
+    if (!streamRef.value || !asrWs) return
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext
+      asrAudioContext = new Ctx({ sampleRate: 16000 })
+      asrSource = asrAudioContext.createMediaStreamSource(streamRef.value)
+      asrProcessor = asrAudioContext.createScriptProcessor(4096, 1, 1)
+      asrProcessor.onaudioprocess = (e) => {
+        if (!asrWs || asrWs.readyState !== WebSocket.OPEN || isMuted.value) return
+        const input = e.inputBuffer.getChannelData(0)
+        const pcm = new Int16Array(input.length)
+        for (let i = 0; i < input.length; i++) {
+          const s = Math.max(-1, Math.min(1, input[i]))
+          pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff
+        }
+        try { asrWs.send(pcm.buffer) } catch { /* noop */ }
+      }
+      asrSource.connect(asrProcessor)
+      asrProcessor.connect(asrAudioContext.destination)  // 某些浏览器需连到 destination 才触发回调
+    } catch {
+      teardownStreamingAsr()
+      if (isActive.value) switchToBackendStt('实时识别采集失败')
+    }
+  }
+
+  function startStreamingAsr(): boolean {
+    if (!streamRef.value || typeof WebSocket === 'undefined') return false
+    try {
+      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+      const ws = new WebSocket(`${proto}://${window.location.host}/api/voice/asr-stream`)
+      ws.binaryType = 'arraybuffer'
+      asrWs = ws
+      ws.onmessage = (ev) => {
+        let m: any; try { m = JSON.parse(typeof ev.data === 'string' ? ev.data : '') } catch { return }
+        if (!m) return
+        if (m.type === 'ready') startPcmCapture()
+        else if (m.type === 'transcript') onStreamingTranscript(String(m.text || ''), m.isFinal === true)
+        else if (m.type === 'error') { teardownStreamingAsr(); if (isActive.value) switchToBackendStt(m.error || '实时识别不可用') }
+      }
+      ws.onerror = () => { teardownStreamingAsr(); if (isActive.value && !usingBackendStt) switchToBackendStt('实时识别连接失败') }
+      ws.onclose = () => { if (usingStreamingAsr && isActive.value && !usingBackendStt) { teardownStreamingAsr(); switchToBackendStt('实时识别连接已断开') } }
+      usingStreamingAsr = true
+      return true
+    } catch { return false }
+  }
+
+  function teardownStreamingAsr() {
+    usingStreamingAsr = false
+    if (streamingFlushTimer) { clearTimeout(streamingFlushTimer); streamingFlushTimer = null }
+    if (asrProcessor) { try { asrProcessor.disconnect(); asrProcessor.onaudioprocess = null } catch { /* noop */ } asrProcessor = null }
+    if (asrSource) { try { asrSource.disconnect() } catch { /* noop */ } asrSource = null }
+    if (asrAudioContext) { try { void asrAudioContext.close() } catch { /* noop */ } asrAudioContext = null }
+    if (asrWs) { try { asrWs.onmessage = null; asrWs.onerror = null; asrWs.onclose = null; asrWs.close() } catch { /* noop */ } asrWs = null }
+    asrCurSentence = ''
+  }
+
   async function startCall() {
     if (isActive.value) return
     error.value = ''
@@ -728,22 +931,26 @@ export function useBrowserVoiceCall(options: UseBrowserVoiceCallOptions) {
       updateAudioLevel()
 
       const voiceSettings = options.getVoiceSettings?.()
-      if (voiceSettings?.localSttPreferred) {
+      // 优先「实时流式识别」（阿里 paraformer-realtime，边说边出字）；失败会自动退回原有通道
+      if (startStreamingAsr()) {
+        usingBackendStt = false
+        recognition = null
+      } else if (voiceSettings?.localSttPreferred) {
         // 国内推荐:直接用本地语音识别,跳过会失败的浏览器(Google)通道
         usingBackendStt = true
         recognition = null
       } else {
-      try {
-        recognition = createRecognition()
-        recognition.start()
-        usingBackendStt = false
-      } catch (recognitionError: any) {
-        recognition = null
-        usingBackendStt = true
-        responseText.value = recognitionError?.message
-          ? `${recognitionError.message} 正在使用本地语音识别通道。`
-          : '正在使用本地语音识别通道。'
-      }
+        try {
+          recognition = createRecognition()
+          recognition.start()
+          usingBackendStt = false
+        } catch (recognitionError: any) {
+          recognition = null
+          usingBackendStt = true
+          responseText.value = recognitionError?.message
+            ? `${recognitionError.message} 正在使用本地语音识别通道。`
+            : '正在使用本地语音识别通道。'
+        }
       }
       callState.value = 'listening'
       connectionQuality.value = 'good'
@@ -758,6 +965,7 @@ export function useBrowserVoiceCall(options: UseBrowserVoiceCallOptions) {
 
   function endCall() {
     currentRun++
+    teardownStreamingAsr()
     clearPassiveTimer()
     stopMediaRecorder()
     stopSpeech()
@@ -780,6 +988,7 @@ export function useBrowserVoiceCall(options: UseBrowserVoiceCallOptions) {
     backendSttBusy = false
     audioLevel.value = 0
     transcript.value = ''
+    replyTtsActive.value = false
     callState.value = 'idle'
   }
 
@@ -810,6 +1019,19 @@ export function useBrowserVoiceCall(options: UseBrowserVoiceCallOptions) {
   // 手动结束当前说话轮次（杂音环境下用户主动触发）
   function finishTurn() {
     if (!isActive.value || callState.value !== 'listening') return
+
+    if (usingStreamingAsr) {
+      // 实时识别：取消静默等待，把已识别到的整段立刻发出去
+      if (streamingFlushTimer) { clearTimeout(streamingFlushTimer); streamingFlushTimer = null }
+      const t = (browserBuffer + asrCurSentence).trim()
+      browserBuffer = ''; asrCurSentence = ''
+      if (t) { void handleFinalTranscript(t) }
+      else {
+        error.value = '还没听到说话内容，请先说话再点。'
+        window.setTimeout(() => { if (error.value.includes('还没听到')) error.value = '' }, 2500)
+      }
+      return
+    }
 
     if (usingBackendStt && mediaRecorder?.state === 'recording') {
       // 后端 STT：强制标记说过话，立刻停录；改为 thinking 给即时视觉反馈
@@ -848,5 +1070,10 @@ export function useBrowserVoiceCall(options: UseBrowserVoiceCallOptions) {
     interrupt,
     toggleMute,
     finishTurn,
+    enqueueSpeech,
+    flushSpeech,
+    startReplySpeech,
+    stopReplySpeech,
+    replyTtsActive,
   }
 }

@@ -659,9 +659,15 @@ export const useAgentStore = defineStore('agent', () => {
 
   async function fetchAgents(): Promise<void> {
     try {
-      // 同时拉三个数据源：活跃会话 + 已配置 agent 列表 + 文件 mtime 运行状态
+      // 同时拉三个数据源：活跃会话(走网关) + 已配置 agent 列表(后端) + 文件 mtime 运行状态(后端)
+      // 关键：网关(sessionsList)忙时会超时——绝不能让它拖垮全局。超时/失败就用后端数据兜底渲染，
+      // 否则一次网关超时会把整个 agent 列表清空 → 卡片全"未知" → 抽屉空白(就是之前页面整空的根因)。
+      const sessionsResilient = Promise.race([
+        sessionsList().catch(() => ({ sessions: [] })),
+        new Promise<{ sessions: any[] }>(resolve => setTimeout(() => resolve({ sessions: [] }), 4000)),
+      ])
       const [sessionsData, configuredResp, runningResp] = await Promise.all([
-        sessionsList(),
+        sessionsResilient,
         fetch('/api/agents-configured').then(r => r.ok ? r.json() : { agents: [] }).catch(() => ({ agents: [] })),
         fetch('/api/agent-running-status').then(r => r.ok ? r.json() : { agents: [] }).catch(() => ({ agents: [] })),
       ])
@@ -989,7 +995,7 @@ export const useAgentStore = defineStore('agent', () => {
   ): Promise<void> {
     try {
       const agentId = extractAgentId(sessionKey)
-      const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:31004'
+      const backendUrl = import.meta.env.VITE_BACKEND_URL || ''
 
       // Step 1: 将所有图片写入 Agent workspace
       const filePaths: string[] = []
@@ -1211,10 +1217,19 @@ export const useAgentStore = defineStore('agent', () => {
       if (agent.status !== 'running') continue
 
       try {
-        const history = await fetchSessionHistory(agent.key, 50)
-        const currentCount = history.length
+        // 改走后端文件聚合接口(快,~50ms)，不再 fetchSessionHistory 问网关——
+        // 这是之前网关被工作台自己刷爆、导致全局 15 秒超时/页面空白的主因。
+        const full = await fetchAgentFullHistory(agent.key, 50)
+        const history = full.messages
+        const currentCount = full.total || history.length
 
+        const hasBaseline = lastMessageCount.value[agent.key] !== undefined
         const prevCount = lastMessageCount.value[agent.key] || 0
+        if (!hasBaseline) {
+          lastMessageCount.value[agent.key] = currentCount
+          continue
+        }
+
         // 仅处理会话重置（消息数变少）：重新初始化计数器
         if (prevCount > currentCount) {
           lastMessageCount.value[agent.key] = currentCount
@@ -1294,22 +1309,47 @@ export const useAgentStore = defineStore('agent', () => {
     delete messageBubbles.value[agentKey]
   }
 
+  // ===== SSE 流式增量：会话文件一变就立刻触发 checkNewMessages，去掉 3 秒轮询延迟 =====
+  // 复用 checkNewMessages 的全部逻辑（基线/去重/系统消息过滤/气泡），SSE 只当"即时唤醒"。
+  // 轮询保留做兜底；SSE 断了浏览器会自动重连，最坏退化回 3 秒轮询。
+  const _msgStreams = new Map<string, EventSource>()
+  let _checkDebounce: ReturnType<typeof setTimeout> | null = null
+  function _scheduleCheck(): void {
+    // 节流到 1.5s：checkNewMessages 会逐个运行中 agent 发请求，太频繁(原 150ms)会在 agent 活跃时造成请求洪水→远程卡顿
+    if (_checkDebounce) return
+    _checkDebounce = setTimeout(() => { _checkDebounce = null; checkNewMessages() }, 1500)
+  }
+  function _syncMessageStreams(): void {
+    if (typeof EventSource === 'undefined') return
+    // agent.key 形如 "agent:main:main"，后端要干净 agentId（取 split(':')[1]，与 fetchAgentFullHistory 一致）
+    const ids = new Set(agents.value.map(a => (a.key || '').split(':')[1] || '').filter(Boolean))
+    for (const id of ids) {
+      if (_msgStreams.has(id)) continue
+      try {
+        const es = new EventSource(`/api/agent-stream?agentId=${encodeURIComponent(id)}`)
+        es.onmessage = () => _scheduleCheck()
+        es.onerror = () => { /* 浏览器自动重连；有 3s 轮询兜底 */ }
+        _msgStreams.set(id, es)
+      } catch { /* 创建失败忽略，轮询兜底 */ }
+    }
+    for (const [id, es] of _msgStreams) {
+      if (!ids.has(id)) { try { es.close() } catch {} ; _msgStreams.delete(id) }
+    }
+  }
+  function _closeAllStreams(): void {
+    for (const [, es] of _msgStreams) { try { es.close() } catch {} }
+    _msgStreams.clear()
+    if (_checkDebounce) { clearTimeout(_checkDebounce); _checkDebounce = null }
+  }
+
   async function subscribeAgents(): Promise<() => void> {
     isPolling.value = true
     await Promise.all([fetchAgents(), fetchGlobalUsage(), fetchHealth(), fetchGatewayUptime(), fetchAgentNames(), fetchGpuVram(), fetchBillingConfig(), fetchCostSummary()])
+    _syncMessageStreams()  // 首屏 agent 就绪后，给每个 agent 开 SSE 流
 
-    // REC-071: 首次加载时静默初始化消息计数器
-    // 注意：limit 必须与 checkNewMessages 轮询用的 50 一致，否则基线(1)和当前计数(50)
-    // 永远对不上，agent 一变"工作中"就会把历史里最后一条旧回复误判为新消息弹出来。
-    for (const agent of agents.value) {
-      if (agent.key.includes(':cron:')) continue
-      if (lastMessageCount.value[agent.key] !== undefined) continue
-      try {
-        const h = await fetchSessionHistory(agent.key, 50)
-        lastMessageCount.value[agent.key] = h.length
-      } catch { /* ignore */ }
-    }
-    console.log('[REC-071] 初始化计数器:', lastMessageCount.value)
+    // REC-071: 首屏不再预拉每个 Agent 的历史。运行中 Agent 第一次轮询时只建立基线，
+    // 避免旧消息误判为新消息，同时不阻塞首页渲染。
+    console.log('[REC-071] 消息计数器改为运行中 Agent 按需初始化')
 
     const interval = setInterval(() => {
       if (!isPolling.value) return
@@ -1317,6 +1357,7 @@ export const useAgentStore = defineStore('agent', () => {
       fetchGlobalUsage()
       fetchGatewayUptime() // Also refresh gateway uptime
       fetchCostSummary()  // Sprint 1: 顶部费用预估
+      _syncMessageStreams()  // agent 增减时同步 SSE 流
     }, AGENT_POLL_INTERVAL)
 
     const healthInterval = setInterval(() => {
@@ -1345,6 +1386,7 @@ export const useAgentStore = defineStore('agent', () => {
         clearInterval(messagePollTimer)
         messagePollTimer = null
       }
+      _closeAllStreams()  // 关闭所有 SSE 流
       // 清理所有气泡定时器
       Object.values(bubbleTimers).forEach(clearTimeout)
       bubbleTimers = {}

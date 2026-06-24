@@ -529,7 +529,7 @@ function getAgentAvatarSrc(id: string): string {
   const envKey = `VITE_AGENT_${id.replace(/-/g, '_').toUpperCase()}_AVATAR`
   const envAvatar = (import.meta.env as Record<string, string>)[envKey]
   if (envAvatar) return envAvatar
-  return `/avatars/${id}.${id === 'main' ? 'jpg' : 'png'}`
+  return `/avatars/thumb/${id}.webp`
 }
 
 async function loadAgentMeta() {

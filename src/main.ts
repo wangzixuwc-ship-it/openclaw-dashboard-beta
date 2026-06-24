@@ -150,18 +150,11 @@ async function uninstallDevelopmentServiceWorkers(): Promise<void> {
   await Promise.all(registrations.map((registration) => registration.unregister().catch(() => false)))
   if ('caches' in window) {
     const keys = await caches.keys().catch(() => [])
-    await Promise.all(keys.filter((key) => key.startsWith('openclaw-dashboard')).map((key) => caches.delete(key)))
+    await Promise.all(keys.map((key) => caches.delete(key)))
   }
 }
 
-// PWA：只在生产构建注册 Service Worker。开发服务要主动注销旧 SW，
-// 否则 Vite 的 /src 与 /.vite-cache 资源可能被旧缓存拦截，页面会继续跑旧组件。
-if (import.meta.env.DEV) {
-  void uninstallDevelopmentServiceWorkers()
-} else if ('serviceWorker' in navigator && window.isSecureContext) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch((err) => {
-      console.warn('[PWA] Service Worker 注册失败:', err)
-    })
-  })
-}
+// PWA Service Worker 已停用：它会缓存旧资源，导致工作台更新后卡住 / 打不开 / 需反复手动清缓存。
+// 现在无论开发还是生产环境，一律主动注销旧 SW 并清空其缓存，确保每次都加载最新版本。
+// 这样改版后用户只需正常刷新（首次拿到本版本时强刷一次即可），不再需要手动 unregister。
+void uninstallDevelopmentServiceWorkers()

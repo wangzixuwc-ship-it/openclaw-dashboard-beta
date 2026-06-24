@@ -1,6 +1,6 @@
  <template>
   <el-drawer v-model="drawerVisible" :title="`Agent 详情：${displayAgentName}`" size="1040px" direction="rtl"
-    :close-on-click-modal="true" :z-index="3000">
+    class="agent-detail-drawer" :close-on-click-modal="true" :z-index="3000">
     <template #header>
       <div class="drawer-title">
         <div class="drawer-avatar" :class="statusColorClass">
@@ -14,6 +14,20 @@
           <el-icon v-else :size="18"><component :is="drawerAvatarIcon" /></el-icon>
         </div>
         <span class="title-text">{{ displayAgentName }}</span>
+        <!-- 原生 select：整页 zoom 下，Element Plus 的 el-select 弹层会被 Popper 算错位置 + 被 header overflow 裁切；
+             原生下拉由浏览器渲染，缩放下绝不错位/不被裁。样式已贴合深色主题。 -->
+        <!-- 思考模型(LLM)：切换 Agent 的大脑，改写 openclaw.json + 重载 -->
+        <span v-if="agent && agentModelOptions.length" class="hdr-switch-label">思考</span>
+        <select
+          v-if="agent && agentModelOptions.length"
+          v-model="agentModel"
+          class="model-switch-native"
+          :disabled="modelSwitching"
+          title="切换该 Agent 的思考模型（LLM）"
+          @change="onModelChange(agentModel)"
+        >
+          <option v-for="m in agentModelOptions" :key="m.value" :value="m.value">{{ m.label }}</option>
+        </select>
         <el-tag :type="statusTagType" :effect="agent?.status === 'running' ? 'dark' : 'light'" size="small"
           class="status-badge">
           <el-icon>
@@ -228,6 +242,20 @@
                   class="quick-tpl-btn"
                   @click="applyTemplate(tpl.text)"
                 >{{ tpl.label }}</el-button>
+                <!-- 对话模式开关：快速对话(直连模型、秒回流式) / 代理模式(走完整主控,可办事但较慢) -->
+                <span class="chat-mode-toggle"
+                  :title="quickChatMode ? '快速对话：直连模型、逐字秒回；不调用工具/不办事' : '代理模式：走完整 Agent，可用工具/查飞书/跑任务，但较慢'">
+                  <el-switch v-model="quickChatMode" size="small" :disabled="sending" />
+                  <span class="chat-mode-label">{{ quickChatMode ? '快速对话 · 秒回流式' : '代理模式 · 可办事(较慢)' }}</span>
+                </span>
+                <!-- 朗读回复开关：打字发消息后，用 Agent 的克隆音色把回复念出来（仅快速对话模式可用）-->
+                <span class="chat-mode-toggle"
+                  :class="{ 'is-disabled': !quickChatMode }"
+                  :title="quickChatMode ? '打开后：打字发消息，回复会用该 Agent 的克隆音色边出字边念出来' : '朗读回复仅在「快速对话」模式下可用'">
+                  <el-switch v-model="speakReplies" size="small" :disabled="sending || !quickChatMode" />
+                  <el-icon class="chat-mode-icon"><Headset /></el-icon>
+                  <span class="chat-mode-label">{{ speakReplies ? '朗读回复 · 开' : '朗读回复' }}</span>
+                </span>
               </div>
               <!-- 粘贴的图片预览 -->
               <div v-if="imageAttachments.length > 0" class="image-preview-strip">
@@ -567,10 +595,25 @@
     width="860px"
     top="5vh"
     :append-to-body="true"
+    :z-index="3200"
     destroy-on-close
     class="daily-summary-dialog"
   >
     <div class="ds-toolbar">
+      <!-- 左：点开小日历选某天（有对话的日期带蓝点，无对话的灰掉） -->
+      <el-date-picker
+        v-model="summaryDateFilter"
+        type="date"
+        value-format="YYYY-MM-DD"
+        placeholder="点开小日历·查某天"
+        :disabled-date="disabledNoSummaryDate"
+        :cell-class-name="summaryDateCellClass"
+        popper-class="ds-cal-popper"
+        size="small"
+        clearable
+        class="ds-date"
+      />
+      <!-- 中：快捷日期范围 -->
       <span class="ds-range">最近</span>
       <el-radio-group v-model="dailySummaryDays" size="small" @change="reloadDailySummary">
         <el-radio-button :value="7">7 天</el-radio-button>
@@ -578,14 +621,26 @@
         <el-radio-button :value="30">30 天</el-radio-button>
       </el-radio-group>
       <span v-if="dailySummaryData" class="ds-stat">共 {{ dailySummaryData.totalSessions }} 个会话 · {{ dailySummaryData.daysList?.length || 0 }} 天</span>
+      <!-- 右：关键词搜索 -->
+      <el-input
+        v-model="summaryKeyword"
+        placeholder="搜索聊天关键词"
+        :prefix-icon="Search"
+        size="small"
+        clearable
+        class="ds-search"
+      />
+      <el-checkbox v-model="summaryAllAgents" size="small" class="ds-allagents">搜所有 Agent</el-checkbox>
+      <span v-if="hasSummaryQuery" class="ds-hit">命中 {{ summaryHitCount }} 条</span>
+      <el-button v-if="hasSummaryQuery" link size="small" @click="clearSummaryQuery">清除</el-button>
     </div>
     <div v-if="dailySummaryLoading" class="ds-loading">正在汇总历史…</div>
-    <el-scrollbar v-else height="74vh">
-      <div v-if="!dailySummaryData || !dailySummaryData.daysList || dailySummaryData.daysList.length === 0" class="ds-empty">
-        最近 {{ dailySummaryDays }} 天没有可展示的活动记录
+    <el-scrollbar v-else height="68vh">
+      <div v-if="filteredSummaryDays.length === 0" class="ds-empty">
+        {{ hasSummaryQuery ? '没有符合条件的记录，换个日期或关键词试试' : `最近 ${dailySummaryDays} 天没有可展示的活动记录` }}
       </div>
       <div v-else class="ds-days">
-        <div v-for="day in dailySummaryData.daysList" :key="day.date" class="ds-day">
+        <div v-for="day in filteredSummaryDays" :key="day.date" class="ds-day">
           <div class="ds-day-head">
             <span class="ds-day-date">{{ day.date }}</span>
             <span class="ds-day-meta">{{ day.sessionCount }} 个会话 · 工具 {{ day.totalTools }} 次</span>
@@ -601,14 +656,33 @@
               <div class="ds-session-top">
                 <span class="ds-time">{{ s.time }}</span>
                 <span class="ds-trigger" :class="s.trigger">{{ s.trigger === 'cron' ? '定时' : '用户' }}</span>
+                <span v-if="dailySummaryData?.allAgents && s.agentId" class="ds-agent-tag">{{ sessionAgentName(s) }}</span>
                 <span class="ds-task">{{ s.task }}</span>
               </div>
               <div class="ds-did"><span class="ds-label">做了</span>{{ s.toolSummary }}</div>
               <div class="ds-result"><span class="ds-label">结果</span>{{ s.result }}</div>
+              <div v-if="s.snippet" class="ds-snippet">
+                <span class="ds-label">原文</span>
+                <span class="ds-snippet-text" v-html="highlightFull(s.snippet)"></span>
+                <a class="ds-fulltext-toggle" @click="openFullSession(s, day)">{{ sessionFullLoading[s.sessionId] ? '加载中…' : '查看完整对话' }}</a>
+              </div>
             </div>
           </div>
         </div>
       </div>
+    </el-scrollbar>
+  </el-dialog>
+
+  <!-- 完整对话查看器：点"查看完整对话"弹出，显示该条会话全文+上下文，命中词高亮 -->
+  <el-dialog v-model="fullSessionVisible" title="完整对话" width="780px" append-to-body
+    class="full-session-dialog" :z-index="3300">
+    <div v-if="fullSessionMeta" class="fs-meta">
+      <span class="fs-when">{{ fullSessionMeta.date }} {{ fullSessionMeta.time }}</span>
+      <span v-if="fullSessionMeta.agentName" class="ds-agent-tag">{{ fullSessionMeta.agentName }}</span>
+      <span class="fs-task">{{ fullSessionMeta.task }}</span>
+    </div>
+    <el-scrollbar max-height="62vh">
+      <div class="fs-body" v-html="highlightFull(fullSessionText)"></div>
     </el-scrollbar>
   </el-dialog>
 </template>
@@ -655,6 +729,8 @@ import {
   ArrowDown,
   RefreshRight,
   VideoPause,
+  Search,
+  Headset,
 } from '@element-plus/icons-vue'
 
 interface MessageItem {
@@ -707,6 +783,114 @@ const dailySummaryLoading = ref(false)
 const dailySummaryDays = ref(14)
 const dailySummaryData = ref<any>(null)
 
+// —— 历史总结里的查询：点开小日历选某天 + 关键词搜索 ——
+const summaryDateFilter = ref<string>('')   // 'YYYY-MM-DD'，空 = 全部
+const summaryKeyword = ref<string>('')      // 关键词，空 = 不限
+const summaryAllAgents = ref(false)         // 搜索时跨所有 agent（主控这搜不到就勾上）
+
+// —— 搜索结果"查看完整对话"：弹窗展示单条会话全文+上下文，命中词高亮 ——
+const sessionFullText = ref<Record<string, string>>({})   // sessionId -> 全文缓存
+const sessionFullLoading = ref<Record<string, boolean>>({})
+const fullSessionVisible = ref(false)
+const fullSessionText = ref('')
+const fullSessionMeta = ref<{ date: string; time: string; agentName: string; task: string } | null>(null)
+function escHtml(s: string): string {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+// 全文里把命中的关键词高亮（先整体转义，再只注入我们自己的 <mark>，安全）
+function highlightFull(text: string): string {
+  const esc = escHtml(text || '')
+  const kw = summaryKeyword.value.trim()
+  if (!kw) return esc
+  const re = new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
+  return esc.replace(re, m => `<mark class="ds-hit">${m}</mark>`)
+}
+async function openFullSession(s: any, day: any): Promise<void> {
+  const id = s.sessionId
+  if (!id) return
+  const showDialog = (text: string) => {
+    fullSessionText.value = text
+    fullSessionMeta.value = {
+      date: day?.date || '',
+      time: s.time || '',
+      agentName: dailySummaryData.value?.allAgents ? sessionAgentName(s) : '',
+      task: s.task || '',
+    }
+    fullSessionVisible.value = true
+  }
+  if (sessionFullText.value[id]) { showDialog(sessionFullText.value[id]); return }   // 已取过直接开
+  const aid = s.agentId || props.agentData?.key?.split(':')[1] || ''
+  if (!aid) { ElMessage.warning('缺少 agent 标识，无法取原文'); return }
+  sessionFullLoading.value[id] = true
+  try {
+    const r = await fetch(`/api/session-fulltext?agentId=${encodeURIComponent(aid)}&sessionId=${encodeURIComponent(id)}`)
+    const d = await r.json()
+    if (d && d.fullText) { sessionFullText.value[id] = d.fullText; showDialog(d.fullText) }
+    else ElMessage.warning(d?.error || '没拿到这条的原文')
+  } catch { ElMessage.error('读取原文失败，稍后再试') }
+  finally { sessionFullLoading.value[id] = false }
+}
+
+// agentId → 显示名（跨 agent 搜索结果上标注来自哪个 agent）
+const agentIdNameMap = computed<Record<string, string>>(() => {
+  const m: Record<string, string> = {}
+  for (const a of store.agents) {
+    const id = (a.key || '').split(':')[1]
+    if (id) m[id] = a.displayName || a.name || id
+  }
+  return m
+})
+function sessionAgentName(s: any): string {
+  const id = s?.agentId || ''
+  return agentIdNameMap.value[id] || id
+}
+
+// 有记录的日期集合（小日历里只让这些天可点，其余灰掉）
+const datesInSummary = computed<Set<string>>(() => {
+  const s = new Set<string>()
+  for (const d of (dailySummaryData.value?.daysList || [])) {
+    if (d?.date) s.add(String(d.date))
+  }
+  return s
+})
+
+function disabledNoSummaryDate(date: Date): boolean {
+  if (!date) return true
+  if (date.getTime() > Date.now()) return true // 未来不可选
+  return !datesInSummary.value.has(tsToLocalDate(date.getTime()))
+}
+
+// 小日历单元格样式：有对话的日期加 'ds-has-msg'（CSS 给它加底部小蓝点）
+function summaryDateCellClass(cell: any): string {
+  let ms = 0
+  if (cell instanceof Date) ms = cell.getTime()
+  else if (cell?.date instanceof Date) ms = cell.date.getTime()
+  else if (cell?.dayjs?.valueOf) ms = cell.dayjs.valueOf()
+  if (!ms) return ''
+  return datesInSummary.value.has(tsToLocalDate(ms)) ? 'ds-has-msg' : ''
+}
+
+const hasSummaryQuery = computed(() => !!summaryDateFilter.value || !!summaryKeyword.value.trim())
+
+function clearSummaryQuery(): void {
+  summaryDateFilter.value = ''
+  summaryKeyword.value = ''
+}
+
+// 按日期 + 关键词过滤后的天列表（关键词同时匹配任务/做了什么/结果）
+const filteredSummaryDays = computed<any[]>(() => {
+  const days = dailySummaryData.value?.daysList || []
+  const dateF = summaryDateFilter.value
+  // 关键词已交给后端在原文里搜，这里只按日期过滤（别再用截断的总结文本做二次过滤，否则会把命中的原文误删）
+  return days
+    .filter((d: any) => !dateF || String(d.date) === dateF)
+    .filter((d: any) => (d.sessions || []).length > 0)
+})
+
+const summaryHitCount = computed<number>(() =>
+  filteredSummaryDays.value.reduce((n, d) => n + (d.sessions?.length || 0), 0)
+)
+
 async function openDailySummary(): Promise<void> {
   const a = agent.value
   if (!a?.key) return
@@ -716,7 +900,10 @@ async function openDailySummary(): Promise<void> {
   dailySummaryLoading.value = true
   dailySummaryData.value = null
   try {
-    const resp = await fetch(`/api/agent-daily-summary?agentId=${encodeURIComponent(agentId)}&days=${dailySummaryDays.value}`)
+    const kw = summaryKeyword.value.trim()
+    const qParam = kw ? `&q=${encodeURIComponent(kw)}` : ''   // 关键词交给后端在原文里搜（搜索时后端自动无视时间范围、扫全量）
+    const allParam = (kw && summaryAllAgents.value) ? '&allAgents=1' : ''   // 勾了就跨所有 agent 搜
+    const resp = await fetch(`/api/agent-daily-summary?agentId=${encodeURIComponent(agentId)}&days=${dailySummaryDays.value}${qParam}${allParam}`)
     if (resp.ok) dailySummaryData.value = await resp.json()
   } catch (_) { /* ignore */ }
   finally { dailySummaryLoading.value = false }
@@ -726,6 +913,14 @@ async function openDailySummary(): Promise<void> {
   generateAiSummaries()
 }
 function reloadDailySummary(): void { openDailySummary() }
+
+// 关键词变化 → 防抖 350ms 后重新向后端查（在原始全文里搜，搜得到被总结掉的原文）；清空也会重查回全部
+let _summaryKwTimer: ReturnType<typeof setTimeout> | null = null
+watch([summaryKeyword, summaryAllAgents], () => {
+  if (!dailySummaryVisible.value) return
+  if (_summaryKwTimer) clearTimeout(_summaryKwTimer)
+  _summaryKwTimer = setTimeout(() => { openDailySummary() }, 350)
+})
 
 // ── AI 摘要(昨天及以前=本地模型,今天=DeepSeek) ──
 const aiSummaries = ref<Record<string, { summary: string; model: string } | undefined>>({})
@@ -887,31 +1082,31 @@ const resetting = ref(false)
 const showSkillsPanel = ref(false)
 const showCronPanel = ref(false)
 
-function latestAssistantVoiceSnapshot(): { signature: string; text: string } | null {
-  for (let i = recentMessages.value.length - 1; i >= 0; i--) {
-    const msg = recentMessages.value[i]
-    if (msg.role !== 'assistant' || msg.contentType !== 'text') continue
-    const text = displayMessageContent(msg).trim()
-    if (!text || /^无需回复/.test(text) || /^模型连通正常/.test(text)) continue
-    return {
-      signature: `${msg.timestamp || ''}|${text}`,
-      text,
-    }
-  }
-  return null
-}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+// 轻量取"最新一条 assistant 回复"(只读会话末尾，不拉全量历史)——给语音通话快速检测用
+async function fetchLatestReplySignature(): Promise<{ signature: string; text: string } | null> {
+  const id = agent.value?.key?.split(':')[1]
+  if (!id) return null
+  try {
+    const r = await fetch(`/api/agent-latest-reply?agentId=${encodeURIComponent(id)}`)
+    const d = await r.json()
+    const text = String(d?.text || '').trim()
+    if (!text) return null
+    return { signature: `${d.ts || ''}|${text}`, text }
+  } catch { return null }
+}
+
 async function waitForVoiceAgentReply(beforeSignature: string): Promise<string | null> {
   const timeoutAt = Date.now() + 90_000
   while (Date.now() < timeoutAt && drawerVisible.value) {
-    await delay(500)   // 轮询更密：模型答完后最多 0.5s 就被检测到（原来 1.8s）
-    await loadHistory(true, true)
-    const latest = latestAssistantVoiceSnapshot()
+    await delay(700)
+    const latest = await fetchLatestReplySignature()   // 轻量：只读会话末尾，不再每次全量拉 1217 条
     if (latest && latest.signature !== beforeSignature) {
+      loadHistory(true, true)   // 检测到了再渲染一次对话(不 await，不阻塞发声)
       return latest.text
     }
   }
@@ -922,11 +1117,26 @@ async function handleVoiceUtterance(text: string): Promise<string | null> {
   if (!agent.value?.key) throw new Error('当前没有可用 Agent 会话')
   if (sending.value) throw new Error('上一条消息还在发送，请稍等')
 
-  const before = latestAssistantVoiceSnapshot()?.signature || ''
+  // 快速对话模式(默认)：语音走直连流式通道 + 边生成边念——每凑齐一句就立刻合成播放，声音追着文字走，
+  // 不再"文字出完了语音还没来"。念完所有句子再返回('')，避免组合式把整段重念一遍。
+  const t0 = Date.now()
+  console.log(`[🎙️ voice] handleVoiceUtterance 开始 quickChatMode=${quickChatMode.value} text="${text.slice(0,20)}"`)
+  if (quickChatMode.value) {
+    await sendQuickChat(text, { voice: true, onSentence: (s) => {
+      console.log(`[🎙️ voice] onSentence 触发 +${Date.now()-t0}ms "${s.slice(0,30)}"`)
+      voiceCall.enqueueSpeech(s)
+    }})
+    console.log(`[🎙️ voice] sendQuickChat 完成 +${Date.now()-t0}ms，等待语音播完`)
+    await voiceCall.flushSpeech()
+    console.log(`[🎙️ voice] 语音播完 +${Date.now()-t0}ms`)
+    return ''
+  }
+
+  // 代理模式：走完整 agent（慢，但能用工具/办事）
+  const before = (await fetchLatestReplySignature())?.signature || ''
   sending.value = true
   try {
     await store.sendAgentMessage(agent.value.key, text)
-    await loadHistory(true, true)
   } finally {
     sending.value = false
   }
@@ -937,6 +1147,51 @@ async function handleVoiceUtterance(text: string): Promise<string | null> {
   }
   return reply
 }
+
+// ── 顶部模型切换 ──
+const agentModel = ref('')
+const agentModelOptions = ref<{ value: string; label: string }[]>([])
+const modelSwitching = ref(false)
+function modelLabel(id: string): string {
+  if (id === 'openai/gpt-5.5') return 'GPT-5.5（强·较慢）'
+  if (id.includes('deepseek')) return 'DeepSeek V4 Pro（国产·快）'
+  return id
+}
+async function fetchAgentModel(): Promise<void> {
+  const id = agent.value?.key?.split(':')[1]
+  if (!id) return
+  try {
+    const r = await fetch(`/api/agent-model?agentId=${encodeURIComponent(id)}`)
+    const d = await r.json()
+    agentModel.value = d.current || ''
+    // 后端现返回 [{value,label}]；兼容旧的纯字符串格式
+    agentModelOptions.value = (d.options || []).map((m: any) =>
+      typeof m === 'string' ? { value: m, label: modelLabel(m) } : { value: m.value, label: m.label || modelLabel(m.value) })
+  } catch { /* 拿不到就不显示下拉 */ }
+}
+async function onModelChange(model: string): Promise<void> {
+  const id = agent.value?.key?.split(':')[1]
+  if (!id || !model) return
+  // 用下拉里的友好中文名（如「通义千问 Plus（均衡）」），不要把 dashscope/qwen-plus 这种技术 ID 甩给用户
+  const label = agentModelOptions.value.find(o => o.value === model)?.label || modelLabel(model)
+  try {
+    await ElMessageBox.confirm(
+      `把「${displayAgentName.value}」的大脑切换成「${label}」？这会改写配置并让它重载（影响它全部工作，不只语音；已自动备份，可随时切回）。`,
+      '切换模型', { confirmButtonText: '切换', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch { await fetchAgentModel(); return }   // 取消 → 还原下拉
+  modelSwitching.value = true
+  try {
+    const r = await fetch('/api/agent-set-model', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agentId: id, model }) })
+    const d = await r.json()
+    if (d.ok) ElMessage.success(`已切到「${label}」，${displayAgentName.value} 正在重载（约几秒后生效，可发消息测速度）`)
+    else { ElMessage.error(d.error || '切换失败'); await fetchAgentModel() }
+  } catch (e: any) { ElMessage.error(e?.message || '切换失败'); await fetchAgentModel() }
+  finally { modelSwitching.value = false }
+}
+// 发声(TTS)在「语音设置」里选；顶部只保留思考模型切换。
+
+watch(drawerVisible, (v) => { if (v) fetchAgentModel() })
 
 const voiceCall = useBrowserVoiceCall({
   onUtterance: handleVoiceUtterance,
@@ -995,9 +1250,16 @@ function applyTemplate(text: string) {
 const chatInput = ref('')
 const sending = ref(false)
 const msgContainerRef = ref<HTMLElement | null>(null)
+// 对话模式：true=快速对话(直连模型流式秒回,默认) false=代理模式(走完整 Agent,可办事但慢)
+const quickChatMode = ref(localStorage.getItem('openclaw-quick-chat-mode') !== '0')
+watch(quickChatMode, v => localStorage.setItem('openclaw-quick-chat-mode', v ? '1' : '0'))
+
+// 朗读回复：打字发消息后，用 Agent 配置的克隆音色把回复念出来（默认关，按 Agent 记忆）
+const speakReplies = ref(localStorage.getItem('openclaw-speak-replies') === '1')
+watch(speakReplies, v => localStorage.setItem('openclaw-speak-replies', v ? '1' : '0'))
 
 // 认知引擎：实时情绪徽章
-const BACKEND_BASE = import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:31022'
+const BACKEND_BASE = import.meta.env.VITE_BACKEND_URL || ''
 const sentimentInfo = ref<{ valence: number; urgency: number; frustration: number; label: string } | null>(null)
 const lastCognitiveAnalysis = ref<any>(null)
 let sentimentTimer: ReturnType<typeof setTimeout> | null = null
@@ -1026,13 +1288,13 @@ const sentimentBadgeStyle = computed(() => {
 
 // ─── #17 @ 提及（@ Mention）功能 ──────────────────────────────────────────────
 const MENTION_AGENTS = [
-  { id: 'pm',        name: '项目经理',   avatar: '/avatars/pm.png' },
-  { id: 'developer', name: '开发工程师', avatar: '/avatars/developer.png' },
-  { id: 'tester',    name: '测试工程师', avatar: '/avatars/tester.png' },
-  { id: 'inspector', name: '巡检员',     avatar: '/avatars/inspector.png' },
-  { id: 'archivist', name: '档案员',     avatar: '/avatars/archivist.png' },
-  { id: 'designer',  name: '美术设计师', avatar: '/avatars/designer.png' },
-  { id: 'main',      name: '主控',       avatar: '/avatars/main.jpg' },
+  { id: 'pm',        name: '项目经理',   avatar: '/avatars/thumb/pm.webp' },
+  { id: 'developer', name: '开发工程师', avatar: '/avatars/thumb/developer.webp' },
+  { id: 'tester',    name: '测试工程师', avatar: '/avatars/thumb/tester.webp' },
+  { id: 'inspector', name: '巡检员',     avatar: '/avatars/thumb/inspector.webp' },
+  { id: 'archivist', name: '档案员',     avatar: '/avatars/thumb/archivist.webp' },
+  { id: 'designer',  name: '美术设计师', avatar: '/avatars/thumb/designer.webp' },
+  { id: 'main',      name: '主控',       avatar: '/avatars/thumb/main.webp' },
 ]
 
 const mentionVisible = ref(false)
@@ -1098,6 +1360,15 @@ function selectMention(ag: { id: string; name: string; avatar: string }): void {
 // REC-036: 消息类型过滤
 const showThinking = ref(true)
 const showTool = ref(false)
+
+// 时间戳 → 本地 'YYYY-MM-DD'（历史总结的小日历按日期匹配用）
+function tsToLocalDate(ms: number): string {
+  if (!ms) return ''
+  const d = new Date(ms)
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return `${d.getFullYear()}-${mm}-${dd}`
+}
 
 const filteredMessages = computed(() => {
   return recentMessages.value.filter(msg => {
@@ -1335,22 +1606,18 @@ const drawerEnvAvatar = computed(() => {
   const envKey = `VITE_AGENT_${idUpper}_AVATAR`
   return (import.meta.env as Record<string, string>)[envKey] || ''
 })
-const drawerAvatarJpgFailed = ref(false)
-const drawerAvatarPngFailed = ref(false)
+const drawerAvatarFailed = ref(false)
 watch(drawerAgentId, () => {
-  drawerAvatarJpgFailed.value = false
-  drawerAvatarPngFailed.value = false
+  drawerAvatarFailed.value = false
 })
 const drawerAvatarSrc = computed(() => {
   if (drawerEnvAvatar.value) return drawerEnvAvatar.value
   if (!drawerAgentId.value) return ''
-  if (!drawerAvatarJpgFailed.value) return `/avatars/${drawerAgentId.value}.jpg`
-  if (!drawerAvatarPngFailed.value) return `/avatars/${drawerAgentId.value}.png`
+  if (!drawerAvatarFailed.value) return `/avatars/thumb/${drawerAgentId.value}.webp`
   return ''
 })
 function onDrawerAvatarError() {
-  if (!drawerAvatarJpgFailed.value) drawerAvatarJpgFailed.value = true
-  else drawerAvatarPngFailed.value = true
+  drawerAvatarFailed.value = true
 }
 
 const agentHistoricalTokens = computed(() => store.getAgentHistoricalTokens(drawerAgentId.value))
@@ -1580,7 +1847,11 @@ async function fetchDrawerSkills(): Promise<void> {
   try {
     const [configResp, skillsResp] = await Promise.all([
       fetch('/api/agents-configured').then(r => r.ok ? r.json() : { agents: [] }).catch(() => ({ agents: [] })),
-      getSkills(),
+      // 技能走网关：网关忙时快速失败(5s)，不拖垮抽屉；技能面板空着也不影响对话
+      Promise.race([
+        getSkills().catch(() => ({ skills: [] })),
+        new Promise<{ skills: any[] }>(resolve => setTimeout(() => resolve({ skills: [] }), 5000)),
+      ]),
     ])
     const agentCfg = (configResp.agents || []).find((a: { id: string; skillsUnconstrained?: boolean }) => a.id === id)
 
@@ -2185,16 +2456,18 @@ async function loadHistory(silent: boolean = false, scrollToEnd: boolean = true)
     historyTruncated.value = false
     historyTotal.value = 0
     try {
-      const full = await store.fetchAgentFullHistory(agent.value.key, 1500)
+      // 只取最近 200 条渲染：一次性渲染上千条 markdown 会把浏览器主线程卡死(页面像死了)。
+      // 完整历史仍可通过「历史 / 历史总结」按钮查看。
+      const full = await store.fetchAgentFullHistory(agent.value.key, 200)
       if (full.messages.length > 0) {
         history = full.messages
         historyTruncated.value = full.truncated
         historyTotal.value = full.total
       }
     } catch (_) { /* 回退到单 session */ }
-    // 回退：聚合接口无数据时，用旧的单 session 接口
+    // 回退：聚合接口(后端,快)无数据时才用单 session(走网关)，限量+兜底，网关忙也不卡死
     if (history.length === 0) {
-      history = await store.fetchSessionHistory(agent.value.key)
+      history = await store.fetchSessionHistory(agent.value.key, 200).catch(() => [])
     }
     historyCount.value = history.length
 
@@ -2322,10 +2595,117 @@ function handleInputKeydown(e: KeyboardEvent): void {
   // Ctrl+Enter / Shift+Enter → 默认行为（插入换行）
 }
 
+// 快速对话(Lumi 式)：直连模型流式逐字回，绕开网关/重型 agent。带主控人设 + 最近几轮记忆。
+async function sendQuickChat(text: string, opts: { voice?: boolean; speak?: boolean; onSentence?: (s: string) => void } = {}): Promise<string> {
+  const aid = agent.value?.key?.split(':')[1]
+  if (!aid) return ''
+  sending.value = true
+  // 组装"最近几轮"上下文(只取纯文本的 user/assistant，最多 10 条)
+  const prior = recentMessages.value
+    .filter(m => m.contentType === 'text' && (m.role === 'user' || m.role === 'assistant') && m.content.trim())
+    .slice(-10)
+    .map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }))
+  const base = `你是${displayAgentName.value}，用户 的个人 AI 助手，住在他的 Mac mini 里。风格：说人话、口语化、直接，不客套不卖弄。`
+  const persona = opts.voice
+    ? base + `现在是【语音通话】：你的回复会用你自己的声音（云端主控音色）念给 用户 听——所以你完全“能说话”，绝对不要说自己没有语音/TTS 能力、没扬声器之类的话。
+像打电话聊天：简短、口语化、一般 1~3 句；不列点、不用 markdown、不长篇大论。问得复杂就先点到为止，等 用户 追问再展开。`
+    : opts.speak
+    ? base + `你的回复会被【朗读出来】给 用户 听，所以：用自然口语断句，别用 markdown 符号（* # \` 等）、别列点编号、别贴代码块；内容可以完整，但要顺口、像在说话。`
+    : base + `用简洁中文回复。`
+  const messages = [{ role: 'system', content: persona }, ...prior, { role: 'user', content: text }]
+  // 先把用户气泡 + 空的助手气泡放进对话区
+  const now = new Date().toISOString()
+  recentMessages.value.push({ role: 'user', contentType: 'text', content: text, timestamp: now })
+  recentMessages.value.push({ role: 'assistant', contentType: 'text', content: '', timestamp: now, senderName: displayAgentName.value, model: '快速对话' })
+  const botIdx = recentMessages.value.length - 1
+  chatInput.value = ''
+  nextTick(() => scrollToBottom())
+  // 流式时凑齐一句(遇句末标点/换行)就回调一次 → 语音侧立刻合成播放，声音追着文字走
+  // 语音模式改进：非贪婪（遇第一个句末标点即触发）；积累 >= 15 字后允许用逗号提前切
+  let flushedLen = 0
+  const tryFlush = (final = false): void => {
+    if (!opts.onSentence) return
+    const content = recentMessages.value[botIdx].content
+    if (final) { const tail = content.slice(flushedLen).trim(); if (tail) { opts.onSentence(tail); flushedLen = content.length }; return }
+    const pending = content.slice(flushedLen)
+    // 第一优先：非贪婪匹配到第一个句末符号
+    const sentM = pending.match(/^[\s\S]*?[。！？!?…\n]/)
+    if (sentM && sentM[0]) { const seg = sentM[0].trim(); if (seg) { opts.onSentence(seg); flushedLen += sentM[0].length } ; return }
+    // 第二优先（语音通话 / 朗读回复）：积累 >= 4 字时，非贪婪找第一个逗号/分号提前触发 TTS
+    // 这样"好的，我了解了。"在第 4 个字就触发 TTS，不等到句末
+    if ((opts.voice || opts.speak) && pending.length >= 4) {
+      const commaM = pending.match(/^[\s\S]*?[，,；;]/)
+      if (commaM && commaM[0] && commaM[0].trim().length >= 2) {
+        opts.onSentence(commaM[0].trim()); flushedLen += commaM[0].length
+      }
+    }
+  }
+  try {
+    const resp = await fetch('/api/quick-chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages, agentId: aid }),
+    })
+    if (!resp.ok || !resp.body) {
+      const d = await resp.json().catch(() => ({}))
+      recentMessages.value[botIdx].content = `（快速对话出错：${d?.error || ('HTTP ' + resp.status)}）`
+      return recentMessages.value[botIdx].content
+    }
+    const reader = resp.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      const lines = buf.split('\n')
+      buf = lines.pop() || ''   // 留最后可能不完整的一行
+      for (const line of lines) {
+        const t = line.trim()
+        if (!t.startsWith('data:')) continue
+        const payload = t.slice(5).trim()
+        if (payload === '[DONE]') continue
+        try {
+          const j = JSON.parse(payload)
+          const delta = j?.choices?.[0]?.delta?.content
+          if (delta) {
+            recentMessages.value[botIdx].content += delta   // 走数组索引改 → 触发响应式 → 气泡逐字长出来
+            tryFlush()   // 凑齐一句就交给语音去念
+            if (isScrolledToBottom()) nextTick(() => scrollToBottom())
+          }
+        } catch { /* 不完整的 JSON 分片，忽略 */ }
+      }
+    }
+    tryFlush(true)   // 把最后不足一句的尾巴也念掉
+    if (!recentMessages.value[botIdx].content) recentMessages.value[botIdx].content = '（没有返回内容）'
+  } catch (e: any) {
+    recentMessages.value[botIdx].content = `（快速对话失败：${e?.message || e}）`
+  } finally {
+    sending.value = false
+  }
+  return recentMessages.value[botIdx]?.content || ''
+}
+
 /** 发送消息到当前会话 */
 async function sendMessage(): Promise<void> {
   const text = chatInput.value.trim()
   if ((!text && imageAttachments.value.length === 0) || !agent.value?.key || sending.value) return
+  // 快速对话模式(默认) + 纯文字 → 走直连流式通道(秒回、逐字)
+  if (quickChatMode.value && imageAttachments.value.length === 0) {
+    if (speakReplies.value) {
+      // 朗读回复：边出文字边用克隆音色念（不开麦、不弹通话浮层）
+      voiceCall.startReplySpeech()
+      try {
+        await sendQuickChat(text, { speak: true, onSentence: (s) => voiceCall.enqueueSpeech(s) })
+        await voiceCall.flushSpeech()
+      } finally {
+        voiceCall.stopReplySpeech()
+      }
+    } else {
+      await sendQuickChat(text)
+    }
+    return
+  }
+  sending.value = true   // 立刻上锁：堵住"认知分析期间连按回车触发重复发送"的口子（之前在分析之后才上锁）
 
   // ── 认知引擎预处理（仅纯文字消息）────────────────────────────────────────
   if (text && imageAttachments.value.length === 0) {
@@ -2343,6 +2723,7 @@ async function sendMessage(): Promise<void> {
         })
         chatInput.value = ''
         sentimentInfo.value = null
+        sending.value = false   // 本地直接回复，提前解锁
         return
       }
       // 有情绪上下文 → 追加到文本前（提示 Agent 用合适语气回复）
@@ -2353,7 +2734,6 @@ async function sendMessage(): Promise<void> {
   }
   // ────────────────────────────────────────────────────────────────────────
 
-  sending.value = true
   try {
     // 方案B：有图片时先写入 Agent workspace，再发送文件路径
     if (imageAttachments.value.length > 0) {
@@ -2491,9 +2871,9 @@ watch(drawerVisible, (val) => {
     // 加载技能数据 + 定时任务
     fetchDrawerSkills()
     fetchAgentCrons()
-    // 抽屉打开期间定时刷新消息
+    // 抽屉打开期间定时刷新消息（快速对话模式下不刷新：避免把直连流式的临时气泡冲掉，也省得反复全量拉历史）
     refreshTimer = setInterval(() => {
-      if (drawerVisible.value && agent.value) {
+      if (drawerVisible.value && agent.value && !quickChatMode.value && !sending.value) {
         const wasAtBottom = isScrolledToBottom()
         loadHistory(true, wasAtBottom) // 静默刷新，仅在用户已在底部时保持底部
       }
@@ -2585,6 +2965,41 @@ watch(recentMessages, () => {
   gap: 4px;
 }
 
+/* 顶部"思考/发声"切换的小标签 */
+.hdr-switch-label {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--el-text-color-secondary, #909399);
+  margin-left: 8px;
+  margin-right: 2px;
+}
+/* 顶部模型切换：原生 select（缩放下不会错位/被裁），样式贴合主题 */
+.model-switch-native {
+  flex-shrink: 0;
+  width: 184px;
+  height: 28px;
+  padding: 0 28px 0 10px;
+  border-radius: 6px;
+  border: 1px solid var(--el-border-color, #4c4d4f);
+  background-color: var(--el-fill-color-blank, #2b2b30);
+  color: var(--el-text-color-primary, #e5e6eb);
+  font-size: 13px;
+  line-height: 26px;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  /* 自绘下拉箭头 */
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23909399' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  transition: border-color 0.15s;
+}
+.model-switch-native:hover { border-color: var(--accent, #0a84ff); }
+.model-switch-native:focus { outline: none; border-color: var(--accent, #0a84ff); }
+.model-switch-native:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* 抽屉头部样式见下方非 scoped 块（抽屉 teleport 到 body，scoped :deep 够不到，必须用全局 + 自定义类） */
+
 /* ==================== 左右布局 ==================== */
 .drawer-body {
   display: flex;
@@ -2651,9 +3066,9 @@ watch(recentMessages, () => {
 }
 
 /* ── 历史总结弹窗 ── */
-.ds-toolbar { display: flex; align-items: center; gap: 10px; padding: 0 2px 12px; border-bottom: 1px solid var(--el-border-color-lighter); margin-bottom: 8px; }
+.ds-toolbar { display: flex; align-items: center; gap: 10px; padding: 0 2px 12px; border-bottom: 1px solid var(--el-border-color-lighter); margin-bottom: 8px; flex-wrap: wrap; }
 .ds-range { font-size: 13px; color: var(--el-text-color-secondary); }
-.ds-stat { margin-left: auto; font-size: 12px; color: var(--el-text-color-secondary); }
+.ds-stat { font-size: 12px; color: var(--el-text-color-secondary); }
 .ds-loading, .ds-empty { text-align: center; padding: 40px 0; color: var(--el-text-color-secondary); font-size: 14px; }
 .ds-days { display: flex; flex-direction: column; gap: 18px; padding-right: 6px; }
 .ds-day-head { display: flex; align-items: baseline; gap: 12px; padding: 4px 0 8px; position: sticky; top: 0; background: var(--el-bg-color); z-index: 1; }
@@ -2844,6 +3259,28 @@ watch(recentMessages, () => {
   color: var(--accent) !important;
   background: rgba(10, 132, 255,0.08) !important;
 }
+/* 对话模式 / 朗读回复 开关 */
+.chat-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.chat-mode-toggle + .chat-mode-toggle {
+  margin-left: 10px;
+}
+.chat-mode-toggle .chat-mode-icon {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.chat-mode-toggle .chat-mode-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.chat-mode-toggle.is-disabled {
+  opacity: 0.45;
+}
 
 /* el-scrollbar 占满 .drawer-right 的全部高度 */
 .drawer-right :deep(.drawer-right-scroll),
@@ -2910,6 +3347,23 @@ watch(recentMessages, () => {
   align-items: center;
   gap: 10px;
   margin-left: auto;
+}
+
+/* 历史查询条元素：日历(左) / 快捷日期(中) / 搜索(右) */
+.ds-date {
+  width: 172px;
+  flex-shrink: 0;
+}
+.ds-search {
+  width: 200px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.ds-hit {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--el-color-primary);
+  flex-shrink: 0;
 }
 
 .info-grid {
@@ -3593,6 +4047,66 @@ html.light-theme .chat-meta { color: rgba(60, 60, 67, 0.6); }
 
 <!-- 非 scoped：v-html 渲染的 markdown 内容不受 scoped 限制 -->
 <style>
+/* 抽屉头部（teleport 到 body，必须非 scoped + 自定义类才生效）：
+   默认 padding 20px 20px 0、margin-bottom 32px —— padding-bottom 0 导致头像/控件贴底"压线"。
+   改成上下对称 padding + 垂直居中 + 适度底部间距，头像和右侧控件都不再压线。 */
+.agent-detail-drawer .el-drawer__header {
+  align-items: center;
+  padding: 14px 24px;
+  margin-bottom: 12px;
+}
+.agent-detail-drawer .el-drawer__title { display: flex; align-items: center; }
+.agent-detail-drawer .el-drawer__close-btn { align-self: center; margin-left: 10px; }
+/* 切换模型的确认框(ElMessageBox)默认 z-index ~2020，会被抽屉(3000)盖住 → 用户看不到确认框、切换发不出去。强制抬到抽屉之上 */
+.el-overlay.is-message-box { z-index: 3300 !important; }
+/* 历史总结弹窗：深色下背景不透明（--bg-card 在深色是 0.58 透明度，会透出底下的聊天）。双类选择器确保盖过全局 .el-dialog 规则 */
+.el-dialog.daily-summary-dialog { background: #26262b !important; }
+html.light-theme .el-dialog.daily-summary-dialog { background: #ffffff !important; }
+/* 搜索命中的原文片段 */
+.daily-summary-dialog .ds-snippet { font-size: 12px; line-height: 1.6; color: var(--el-text-color-secondary); margin-top: 3px; }
+.daily-summary-dialog .ds-snippet .ds-label { display: inline-block; min-width: 30px; color: var(--accent, #0a84ff); font-weight: 600; margin-right: 4px; }
+/* 原文片段：预览不顶满，命中高亮，末尾"查看完整对话" */
+.daily-summary-dialog .ds-snippet .ds-snippet-text { color: var(--el-text-color-secondary); }
+.daily-summary-dialog .ds-fulltext-toggle { color: var(--accent, #0a84ff); cursor: pointer; margin-left: 6px; white-space: nowrap; }
+.daily-summary-dialog .ds-fulltext-toggle:hover { text-decoration: underline; }
+/* 跨 agent 搜索时标注来自哪个 agent */
+.daily-summary-dialog .ds-agent-tag { font-size: 11px; padding: 1px 7px; border-radius: 10px; flex-shrink: 0; background: rgba(10,132,255,0.15); color: var(--accent, #0a84ff); }
+
+/* 完整对话查看器弹窗 */
+.el-dialog.full-session-dialog { background: #26262b !important; }
+html.light-theme .el-dialog.full-session-dialog { background: #ffffff !important; }
+.full-session-dialog .fs-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--el-text-color-secondary); margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--el-border-color-lighter, rgba(255,255,255,0.08)); }
+.full-session-dialog .fs-meta .fs-when { font-weight: 600; color: var(--el-text-color-primary); }
+.full-session-dialog .fs-meta .fs-task { color: var(--el-text-color-secondary); }
+.full-session-dialog .fs-body { white-space: pre-wrap; word-break: break-word; line-height: 1.7; font-size: 13px; color: var(--el-text-color-primary); padding-right: 6px; }
+/* 命中关键词高亮（片段 + 全文弹窗都生效） */
+.daily-summary-dialog .ds-hit, .full-session-dialog .ds-hit { background: #ffd54f; color: #1a1a1a; border-radius: 2px; padding: 0 1px; }
+
+/* 历史总结里的小日历：弹层要盖过历史总结弹窗(z-index 3200)，否则点开看不到日历 */
+.ds-cal-popper {
+  z-index: 5200 !important;
+}
+/* 小日历里「有对话」的日期：数字加粗 + 底部小蓝点；无对话的日期被 disabled 灰掉 */
+.el-date-table td.ds-has-msg {
+  position: relative;
+}
+.el-date-table td.ds-has-msg .el-date-table-cell__text {
+  font-weight: 700;
+  color: var(--el-color-primary);
+}
+.el-date-table td.ds-has-msg::after {
+  content: '';
+  position: absolute;
+  bottom: 2px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--el-color-primary);
+  z-index: 1;
+}
+
 .el-popper.agent-help-tooltip {
   z-index: 5200 !important;
   max-width: 320px;
