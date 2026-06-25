@@ -191,12 +191,21 @@ const backupsForSelected = computed(() => {
   return backups.value.filter(b => b.version === selected.value!.version)
 })
 
+// 按通道选对应的脱敏仓库：正式版→stable 仓库，内测版→beta 仓库。
+// 优先用分通道变量；没配则回退到单一的 VITE_SHARE_REPO_URL（向后兼容），再回退占位。
+function shareRepoFor(channel?: 'stable' | 'beta'): string {
+  const stable = import.meta.env.VITE_SHARE_REPO_URL_STABLE as string | undefined
+  const beta = import.meta.env.VITE_SHARE_REPO_URL_BETA as string | undefined
+  const legacy = import.meta.env.VITE_SHARE_REPO_URL as string | undefined
+  const fallback = legacy || 'https://github.com/<你的用户名>/openclaw-dashboard'
+  return (channel === 'beta' ? beta : stable) || fallback
+}
+
 // 复制「当前选中版本」的分享内容（介绍 + 该版本功能 + 该版本部署链接），粘贴给别人即可部署对应版本
-// 仓库地址从环境变量 VITE_SHARE_REPO_URL 读，不写死任何仓库
 function copyShare() {
   const v = selected.value
   if (!v) return
-  const repo = (import.meta.env.VITE_SHARE_REPO_URL as string) || 'https://github.com/<你的用户名>/openclaw-dashboard'
+  const repo = shareRepoFor(v.channel)
   const channel = v.channel === 'beta' ? '内测版' : '正式版'
   const feats = (v.features || []).map((f) => '· ' + f).join('\n')
   const text = `OpenClaw Dashboard · v${v.version}（${channel}）—— 多 Agent 可视化管理工作台
